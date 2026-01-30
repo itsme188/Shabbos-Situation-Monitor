@@ -18,24 +18,30 @@ A hands-free, auto-refreshing local dashboard for monitoring Iran/Israel/Middle 
 
 Light, minimal design with earth-tone accents for easy reading.
 
-## Quick Start
+## Quick Start (Mac)
+
+**Step 1:** Open Terminal (press Cmd+Space, type "Terminal", hit Enter)
+
+**Step 2:** Copy and paste these commands one at a time, pressing Enter after each:
+```bash
+cd ~/Desktop
+git clone https://github.com/itsme188/Shabbos-Situation-Monitor.git
+cd Shabbos-Situation-Monitor
+./start.sh
+```
+
+**Step 3:** Open your browser and go to: **http://localhost:8080**
+
+**Step 4:** Leave it open — it refreshes automatically every 5 minutes!
+
+### Manual Setup (if the above doesn't work)
 
 ```bash
-# Clone the repo
-git clone https://github.com/YOUR_USERNAME/shabbos-situation-monitor.git
-cd shabbos-situation-monitor
-
-# Run the start script (creates venv, installs deps, starts server)
-./start.sh
-
-# Or manually:
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 python server.py
 ```
-
-Then open http://localhost:8080 in your browser.
 
 ## Configuration
 
