@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="refresh" content="{{ refresh_interval }}">
+    <title>Shabbos Monitor</title>
+    <style>
+        :root {
+            --bg-page: #f5f3ef;
+            --bg-card: #ffffff;
+            --bg-header: #faf9f7;
+            --text-primary: #2c2c2c;
+            --text-secondary: #6b6b6b;
+            --text-muted: #9a9a9a;
+            --border: #e8e4de;
+            --border-light: #f0ece6;
+
+            /* Soft earth-tone accents */
+            --accent-sage: #7d9a7d;
+            --accent-clay: #c4a882;
+            --accent-dusty-rose: #c9a9a6;
+            --accent-slate: #8a9aab;
+            --accent-sand: #d4c4a8;
+            --accent-moss: #6b7d6b;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Georgia', 'Times New Roman', serif;
+            background: var(--bg-page);
+            color: var(--text-primary);
+            line-height: 1.6;
+            padding: 1.5rem;
+            min-height: 100vh;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 1rem 0;
+            margin-bottom: 1.5rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        h1 {
+            font-size: 1.5rem;
+            font-weight: 400;
+            color: var(--text-primary);
+            letter-spacing: -0.02em;
+        }
+
+        .status {
+            display: flex;
+            gap: 1.25rem;
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        }
+
+        .status-item {
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+        }
+
+        .status-dot {
+            display: inline-block;
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+        }
+
+        .status-ok { background: var(--accent-sage); }
+        .status-error { background: var(--accent-dusty-rose); }
+        .status-warn { background: var(--accent-clay); }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(5, 1fr);
+            gap: 1.25rem;
+            height: calc(100vh - 120px);
+        }
+
+        @media (max-width: 1600px) {
+            .grid {
+                grid-template-columns: repeat(3, 1fr);
+                height: auto;
+            }
+        }
+
+        @media (max-width: 1200px) {
+            .grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+
+        @media (max-width: 768px) {
+            .grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .feed {
+            background: var(--bg-card);
+            border-radius: 4px;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            max-height: calc(100vh - 120px);
+            border: 1px solid var(--border);
+        }
+
+        @media (max-width: 1600px) {
+            .feed {
+                max-height: 500px;
+            }
+        }
+
+        .feed-header {
+            padding: 0.875rem 1rem;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            font-weight: 500;
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            background: var(--bg-header);
+            border-bottom: 1px solid var(--border-light);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            color: var(--text-secondary);
+        }
+
+        .feed-header .indicator {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-right: 0.5rem;
+            display: inline-block;
+        }
+
+        .feed-header.twitter-list .indicator { background: var(--accent-slate); }
+        .feed-header.trump .indicator { background: var(--accent-clay); }
+        .feed-header.iran .indicator { background: var(--accent-dusty-rose); }
+        .feed-header.toi .indicator { background: var(--accent-moss); }
+        .feed-header.polymarket .indicator { background: var(--accent-sage); }
+
+        .feed-count {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            font-weight: 400;
+        }
+
+        .feed-content {
+            overflow-y: auto;
+            flex: 1;
+        }
+
+        .feed-item {
+            padding: 0.875rem 1rem;
+            border-bottom: 1px solid var(--border-light);
+        }
+
+        .feed-item:last-child {
+            border-bottom: none;
+        }
+
+        .item-meta {
+            display: flex;
+            justify-content: space-between;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            margin-bottom: 0.35rem;
+        }
+
+        .item-author {
+            color: var(--accent-slate);
+            font-weight: 500;
+        }
+
+        .item-time {
+            color: var(--text-muted);
+        }
+
+        .item-text {
+            font-size: 0.9rem;
+            color: var(--text-primary);
+            line-height: 1.5;
+        }
+
+        .item-title {
+            font-weight: 600;
+            margin-bottom: 0.25rem;
+            font-size: 0.9rem;
+        }
+
+        .item-link {
+            color: var(--accent-slate);
+            text-decoration: none;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            font-size: 0.7rem;
+        }
+
+        .item-link:hover {
+            text-decoration: underline;
+        }
+
+        .error-message {
+            padding: 1rem;
+            color: var(--accent-clay);
+            font-style: italic;
+            text-align: center;
+            font-size: 0.85rem;
+        }
+
+        .no-items {
+            padding: 2rem 1rem;
+            color: var(--text-muted);
+            text-align: center;
+            font-size: 0.85rem;
+        }
+
+        .liveblog-tag {
+            display: inline-block;
+            background: var(--accent-dusty-rose);
+            color: white;
+            padding: 0.1rem 0.4rem;
+            border-radius: 2px;
+            font-size: 0.6rem;
+            font-weight: 500;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+            margin-left: 0.5rem;
+        }
+
+        .rss-tag {
+            display: inline-block;
+            background: var(--border);
+            color: var(--text-muted);
+            padding: 0.1rem 0.4rem;
+            border-radius: 2px;
+            font-size: 0.6rem;
+            text-transform: uppercase;
+            margin-left: 0.5rem;
+        }
+
+        /* Polymarket specific */
+        .probability {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            font-size: 1.75rem;
+            font-weight: 600;
+            margin-bottom: 0.25rem;
+        }
+
+        .probability-low {
+            color: var(--accent-sage);
+        }
+
+        .probability-med {
+            color: var(--accent-clay);
+        }
+
+        .probability-high {
+            color: var(--accent-dusty-rose);
+        }
+
+        .market-title {
+            font-weight: 600;
+            font-size: 0.9rem;
+            margin-bottom: 0.4rem;
+            color: var(--text-primary);
+        }
+
+        .market-question {
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            margin-bottom: 0.4rem;
+            line-height: 1.4;
+        }
+
+        .market-volume {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            font-size: 0.7rem;
+            color: var(--text-muted);
+        }
+
+        .refresh-indicator {
+            position: fixed;
+            bottom: 1rem;
+            right: 1rem;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            font-size: 0.7rem;
+            color: var(--text-muted);
+        }
+
+        /* Scrollbar styling */
+        .feed-content::-webkit-scrollbar {
+            width: 4px;
+        }
+
+        .feed-content::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .feed-content::-webkit-scrollbar-thumb {
+            background: var(--border);
+            border-radius: 2px;
+        }
+
+        .feed-content::-webkit-scrollbar-thumb:hover {
+            background: var(--text-muted);
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Shabbos Situation Monitor</h1>
+        <div class="status">
+            <span class="status-item">
+                <span class="status-dot {{ 'status-ok' if cache['twitter_list']['items'] and not cache['twitter_list']['error'] else ('status-warn' if cache['twitter_list']['items'] else 'status-error') }}"></span>
+                Twitter
+            </span>
+            <span class="status-item">
+                <span class="status-dot {{ 'status-ok' if cache['trump']['items'] and not cache['trump']['error'] else ('status-warn' if cache['trump']['items'] else 'status-error') }}"></span>
+                Trump
+            </span>
+            <span class="status-item">
+                <span class="status-dot {{ 'status-ok' if cache['reuters']['items'] and not cache['reuters']['error'] else ('status-warn' if cache['reuters']['items'] else 'status-error') }}"></span>
+                News
+            </span>
+            <span class="status-item">
+                <span class="status-dot {{ 'status-ok' if cache['toi_liveblog']['items'] and not cache['toi_liveblog']['error'] else ('status-warn' if cache['toi_liveblog']['items'] else 'status-error') }}"></span>
+                TOI
+            </span>
+            <span class="status-item">
+                <span class="status-dot {{ 'status-ok' if cache['polymarket']['items'] and not cache['polymarket']['error'] else ('status-warn' if cache['polymarket']['items'] else 'status-error') }}"></span>
+                Markets
+            </span>
+            <span class="status-item" style="margin-left: 0.5rem; padding-left: 1rem; border-left: 1px solid var(--border);">
+                {{ generated_at.strftime('%H:%M') }}
+            </span>
+        </div>
+    </header>
+
+    <div class="grid">
+        <!-- Twitter Accounts Column -->
+        <div class="feed">
+            <div class="feed-header twitter-list">
+                <span><span class="indicator"></span>Twitter</span>
+                <span class="feed-count">{{ cache['twitter_list']['items']|length }}</span>
+            </div>
+            <div class="feed-content" id="twitter-scroll">
+                {% if cache['twitter_list']['error'] and not cache['twitter_list']['items'] %}
+                    <div class="error-message">{{ cache['twitter_list']['error'] }}</div>
+                {% elif not cache['twitter_list']['items'] %}
+                    <div class="no-items">No items available</div>
+                {% else %}
+                    {% for item in cache['twitter_list']['items'] %}
+                    <div class="feed-item">
+                        <div class="item-meta">
+                            <span class="item-author">@{{ item.author }}</span>
+                            <span class="item-time">{{ item.timestamp_display }}</span>
+                        </div>
+                        <div class="item-text">{{ item.text }}</div>
+                    </div>
+                    {% endfor %}
+                {% endif %}
+            </div>
+        </div>
+
+        <!-- Trump Column -->
+        <div class="feed">
+            <div class="feed-header trump">
+                <span><span class="indicator"></span>Trump</span>
+                <span class="feed-count">{{ cache['trump']['items']|length }}</span>
+            </div>
+            <div class="feed-content">
+                {% if cache['trump']['error'] and not cache['trump']['items'] %}
+                    <div class="error-message">{{ cache['trump']['error'] }}</div>
+                {% elif not cache['trump']['items'] %}
+                    <div class="no-items">No items available</div>
+                {% else %}
+                    {% for item in cache['trump']['items'] %}
+                    <div class="feed-item">
+                        <div class="item-meta">
+                            <span class="item-time">{{ item.timestamp_display }}</span>
+                        </div>
+                        <div class="item-text">{{ item.text }}</div>
+                    </div>
+                    {% endfor %}
+                {% endif %}
+            </div>
+        </div>
+
+        <!-- Middle East News Column -->
+        <div class="feed">
+            <div class="feed-header iran">
+                <span><span class="indicator"></span>Middle East</span>
+                <span class="feed-count">{{ cache['reuters']['items']|length }}</span>
+            </div>
+            <div class="feed-content">
+                {% if cache['reuters']['error'] and not cache['reuters']['items'] %}
+                    <div class="error-message">{{ cache['reuters']['error'] }}</div>
+                {% elif not cache['reuters']['items'] %}
+                    <div class="no-items">No news found</div>
+                {% else %}
+                    {% for item in cache['reuters']['items'] %}
+                    <div class="feed-item">
+                        <div class="item-meta">
+                            <span class="item-time">{{ item.timestamp_display }}</span>
+                        </div>
+                        {% if item.title %}
+                        <div class="item-title">{{ item.title }}</div>
+                        {% endif %}
+                        {% if item.summary %}
+                        <div class="item-text">{{ item.summary }}</div>
+                        {% endif %}
+                    </div>
+                    {% endfor %}
+                {% endif %}
+            </div>
+        </div>
+
+        <!-- Times of Israel Column -->
+        <div class="feed">
+            <div class="feed-header toi">
+                <span><span class="indicator"></span>Times of Israel</span>
+                <span class="feed-count">{{ cache['toi_liveblog']['items']|length }}</span>
+            </div>
+            <div class="feed-content">
+                {% if cache['toi_liveblog']['error'] and not cache['toi_liveblog']['items'] %}
+                    <div class="error-message">{{ cache['toi_liveblog']['error'] }}</div>
+                {% elif not cache['toi_liveblog']['items'] %}
+                    <div class="no-items">No updates available</div>
+                {% else %}
+                    {% for item in cache['toi_liveblog']['items'] %}
+                    <div class="feed-item">
+                        <div class="item-meta">
+                            <span class="item-time">{{ item.timestamp_display }}</span>
+                            {% if item.source == 'liveblog' %}
+                            <span class="liveblog-tag">Live</span>
+                            {% endif %}
+                        </div>
+                        {% if item.title %}
+                        <div class="item-title">{{ item.title }}</div>
+                        {% endif %}
+                        {% if item.summary %}
+                        <div class="item-text">{{ item.summary }}</div>
+                        {% endif %}
+                    </div>
+                    {% endfor %}
+                {% endif %}
+            </div>
+        </div>
+
+        <!-- Polymarket Column -->
+        <div class="feed">
+            <div class="feed-header polymarket">
+                <span><span class="indicator"></span>Polymarket</span>
+                <span class="feed-count">{{ cache['polymarket']['items']|length }}</span>
+            </div>
+            <div class="feed-content">
+                {% if cache['polymarket']['error'] and not cache['polymarket']['items'] %}
+                    <div class="error-message">{{ cache['polymarket']['error'] }}</div>
+                {% elif not cache['polymarket']['items'] %}
+                    <div class="no-items">No markets available</div>
+                {% else %}
+                    {% for item in cache['polymarket']['items'] %}
+                    <div class="feed-item">
+                        <div class="market-title">{{ item.title }}</div>
+                        <div class="probability {% if item.probability < 20 %}probability-low{% elif item.probability < 50 %}probability-med{% else %}probability-high{% endif %}">
+                            {{ item.probability }}%
+                        </div>
+                        <div class="market-question">{{ item.question }}</div>
+                        <div class="market-volume">${{ "{:,.0f}".format(item.volume) }} vol</div>
+                    </div>
+                    {% endfor %}
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    <div class="refresh-indicator">
+        Auto-refresh {{ refresh_interval // 60 }}m
+    </div>
+
+    <script>
+        // Auto-scroll for Twitter column only
+        (function() {
+            const twitterContent = document.getElementById('twitter-scroll');
+            if (!twitterContent) return;
+
+            const scrollHeight = twitterContent.scrollHeight;
+            const clientHeight = twitterContent.clientHeight;
+            const maxScroll = scrollHeight - clientHeight;
+
+            if (maxScroll <= 0) return; // Nothing to scroll
+
+            // Calculate scroll duration to complete before page refresh
+            // Page refreshes every {{ refresh_interval }} seconds, use 80% of that time
+            const totalDuration = {{ refresh_interval }} * 0.8 * 1000; // in ms
+            const scrollStep = 1; // pixels per step
+            const steps = maxScroll / scrollStep;
+            const intervalTime = totalDuration / steps;
+
+            let currentScroll = 0;
+            let scrollingDown = true;
+
+            setInterval(function() {
+                if (scrollingDown) {
+                    currentScroll += scrollStep;
+                    if (currentScroll >= maxScroll) {
+                        currentScroll = maxScroll;
+                        scrollingDown = false;
+                    }
+                } else {
+                    currentScroll -= scrollStep;
+                    if (currentScroll <= 0) {
+                        currentScroll = 0;
+                        scrollingDown = true;
+                    }
+                }
+                twitterContent.scrollTop = currentScroll;
+            }, intervalTime);
+        })();
+    </script>
+</body>
+</html>

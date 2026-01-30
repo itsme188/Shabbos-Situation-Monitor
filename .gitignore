@@ -1,0 +1,19 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Logs
+*.log
+server.log
+
+# Auth files (sensitive)
+twikit_cookies.json
+
+# OS files
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
