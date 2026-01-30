@@ -14,6 +14,8 @@ A hands-free, auto-refreshing local dashboard for monitoring Iran/Israel/Middle 
 
 ## Screenshot
 
+![Shabbos Situation Monitor](images/screenshot.png)
+
 Light, minimal design with earth-tone accents for easy reading.
 
 ## Quick Start
