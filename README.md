@@ -43,6 +43,22 @@ pip install -r requirements.txt
 python server.py
 ```
 
+### Troubleshooting: SSL Errors / No Fresh Data
+
+If all feeds fail with `SSLError(PermissionError(1, 'Operation not permitted'))`, your Python's SSL library is too old for macOS. The fix is to use a newer Python (3.12+) which bundles its own OpenSSL:
+
+```bash
+brew install python@3.12
+cd ~/Desktop/Shabbos-Situation-Monitor
+rm -rf venv
+python3.12 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+python server.py
+```
+
+The root cause: older macOS-bundled Python (3.9 and earlier) uses LibreSSL 2.8.3, which macOS may block from making HTTPS connections. Homebrew Python 3.12+ ships its own OpenSSL and avoids this entirely.
+
 ## Configuration
 
 Edit `config.py` to customize:
@@ -70,9 +86,14 @@ Edit `config.py` to customize:
 - Jinja2 templates
 - Vanilla JS for auto-scroll
 
+## Known Issues
+
+- **Nitter instances are unreliable** - They frequently return 503 errors or go offline entirely. The Twitter syndication API (`syndication.twitter.com`) is tried first but may also fail. Twitter/X data is the most fragile feed source.
+- **All feeds can fail silently** - If fetches fail, the dashboard shows stale cached data from the last successful fetch rather than displaying errors prominently. Check `server.log` or the `/health` endpoint to diagnose.
+- **macOS SSL compatibility** - Python 3.9 and older may not be able to make HTTPS requests on newer macOS versions (see Troubleshooting above).
+
 ## Notes
 
-- Twitter fetching uses Nitter instances which can be unreliable (503 errors are normal)
 - The page auto-refreshes via `<meta http-equiv="refresh">` - no JavaScript polling
 - Designed to run on localhost; not intended for production deployment
 
