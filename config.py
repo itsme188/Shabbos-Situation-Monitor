@@ -61,6 +61,10 @@ CANDLE_LIGHTING_OFFSET = 18  # minutes before sunset
 HAVDALAH_OFFSET = 50         # minutes after Saturday sunset
 SHABBOS_SNAPSHOT_FILE = "shabbos_snapshot.json"
 
+# Cache persistence (survives server restarts)
+CACHE_FILE = "feed_cache.json"
+CACHE_MAX_AGE = 7200  # seconds (2 hours) - ignore cache files older than this
+
 # Display settings
 MAX_ITEMS_PER_FEED = 15
 

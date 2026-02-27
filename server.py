@@ -11,6 +11,9 @@ Or use: ./start.sh
 import json
 import logging
 import os
+import tempfile
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from logging.handlers import RotatingFileHandler
@@ -37,6 +40,7 @@ from config import (
     MAX_ITEMS_PER_FEED, REQUEST_TIMEOUT,
     LOCATION_LAT, LOCATION_LON, LOCATION_TZ,
     CANDLE_LIGHTING_OFFSET, HAVDALAH_OFFSET, SHABBOS_SNAPSHOT_FILE,
+    CACHE_FILE, CACHE_MAX_AGE,
 )
 
 # Setup logging with rotation
@@ -66,6 +70,74 @@ cache: Dict = {
     "toi_liveblog": {"items": [], "last_updated": None, "error": None},
     "polymarket": {"items": [], "last_updated": None, "error": None},
 }
+
+
+# ============ CACHE PERSISTENCE ============
+
+def save_cache_to_disk() -> None:
+    """Persist the feed cache to disk so restarts don't lose data.
+
+    Uses atomic write (write to temp file, then rename) to avoid
+    corrupted files if the process is killed mid-write.
+    """
+    try:
+        serializable = {}
+        for feed_name, feed_data in cache.items():
+            serializable[feed_name] = {
+                "items": feed_data["items"],
+                "last_updated": feed_data["last_updated"].isoformat() if feed_data["last_updated"] else None,
+                "error": feed_data["error"],
+            }
+        # Atomic write: write to temp file in same directory, then rename
+        dir_name = os.path.dirname(os.path.abspath(CACHE_FILE))
+        fd, tmp_path = tempfile.mkstemp(dir=dir_name, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump({"saved_at": datetime.now().isoformat(), "feeds": serializable}, f)
+            os.replace(tmp_path, CACHE_FILE)
+        except Exception:
+            # Clean up temp file if rename failed
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+        logger.debug("Cache saved to disk")
+    except Exception as e:
+        logger.warning(f"Failed to save cache to disk: {e}")
+
+
+def load_cache_from_disk() -> bool:
+    """Load cached feed data from disk on startup.
+
+    Returns True if cache was loaded, False otherwise.
+    Only loads if the cache file is less than CACHE_MAX_AGE seconds old.
+    """
+    try:
+        if not os.path.exists(CACHE_FILE):
+            return False
+        with open(CACHE_FILE) as f:
+            data = json.load(f)
+        saved_at = datetime.fromisoformat(data["saved_at"])
+        age = (datetime.now() - saved_at).total_seconds()
+        if age > CACHE_MAX_AGE:
+            logger.info(f"Cache file is {age/60:.0f}m old (>{CACHE_MAX_AGE/60:.0f}m limit), ignoring")
+            return False
+        feeds = data.get("feeds", {})
+        loaded_count = 0
+        for feed_name, feed_data in feeds.items():
+            if feed_name in cache and feed_data.get("items"):
+                cache[feed_name]["items"] = feed_data["items"]
+                cache[feed_name]["error"] = feed_data.get("error")
+                if feed_data.get("last_updated"):
+                    cache[feed_name]["last_updated"] = datetime.fromisoformat(feed_data["last_updated"])
+                loaded_count += 1
+        logger.info(f"Loaded {loaded_count} feeds from disk cache ({age/60:.1f}m old)")
+        return loaded_count > 0
+    except (FileNotFoundError, json.JSONDecodeError, KeyError, ValueError) as e:
+        logger.debug(f"Could not load cache from disk: {e}")
+        return False
+
 
 # ============ SHABBOS TIME CALCULATIONS ============
 
@@ -803,6 +875,10 @@ def update_all_feeds() -> None:
 
     elapsed = (datetime.now() - start).total_seconds()
     logger.info(f"Feed update cycle complete in {elapsed:.1f}s")
+
+    # Persist cache to disk after every update cycle
+    save_cache_to_disk()
+
     logger.info("=" * 50)
 
 
@@ -866,7 +942,46 @@ def manual_refresh():
 
 # ============ MAIN ============
 
+def _watchdog_loop():
+    """Background watchdog that detects stale feeds and forces recovery.
+
+    Runs every 2x the refresh interval. If no feed has been updated in
+    3x the refresh interval, it means the scheduler has silently died —
+    so the watchdog forces a manual update cycle.
+    """
+    stale_threshold = REFRESH_INTERVAL * 3  # seconds
+    while True:
+        time.sleep(REFRESH_INTERVAL * 2)
+        try:
+            now = datetime.now()
+            timestamps = [
+                data["last_updated"]
+                for data in cache.values()
+                if data["last_updated"]
+            ]
+            if not timestamps:
+                logger.warning("WATCHDOG: No feeds have ever been updated, forcing fetch")
+                update_all_feeds()
+                continue
+            newest = max(timestamps)
+            age = (now - newest).total_seconds()
+            if age > stale_threshold:
+                logger.error(
+                    f"WATCHDOG: Feeds are {age/60:.0f}m stale "
+                    f"(threshold: {stale_threshold/60:.0f}m). Forcing update."
+                )
+                update_all_feeds()
+            else:
+                logger.debug(f"WATCHDOG: Feeds healthy, newest is {age/60:.1f}m old")
+        except Exception as e:
+            logger.error(f"WATCHDOG: Error in watchdog loop: {e}")
+
+
 if __name__ == "__main__":
+    # Load cached data from disk (instant dashboard on restart)
+    if load_cache_from_disk():
+        logger.info("Dashboard will show cached data while feeds refresh")
+
     # Setup scheduler for background updates
     scheduler = BackgroundScheduler()
     scheduler.add_job(
@@ -876,6 +991,11 @@ if __name__ == "__main__":
         id="feed_updater"
     )
     scheduler.start()
+
+    # Start watchdog thread (detects stale feeds / dead scheduler)
+    watchdog = threading.Thread(target=_watchdog_loop, daemon=True, name="watchdog")
+    watchdog.start()
+    logger.info("Watchdog thread started")
 
     # Initial fetch on startup
     logger.info("Performing initial feed fetch...")
@@ -887,6 +1007,8 @@ if __name__ == "__main__":
     print("=" * 50)
     print(f"\n  Dashboard: http://localhost:{PORT}")
     print(f"  Refresh interval: {REFRESH_INTERVAL // 60} minutes")
+    print(f"  Auto-restart: via start.sh")
+    print(f"  Watchdog: active")
     print(f"\n  Press Ctrl+C to stop\n")
     print("=" * 50 + "\n")
 

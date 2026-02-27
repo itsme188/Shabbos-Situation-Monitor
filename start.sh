@@ -62,8 +62,25 @@ if [ -n "$LOCAL_IP" ]; then
 fi
 echo ""
 echo "Press Ctrl+C to stop the server"
+echo "Server will auto-restart on crash."
 echo "========================================"
 echo ""
 
-# Run the server
-python3 server.py
+# Run the server with auto-restart on crash
+# Ctrl+C (SIGINT) exits the loop cleanly via the trap
+trap 'echo -e "\n${YELLOW}Shutting down...${NC}"; exit 0' INT TERM
+
+while true; do
+    python3 server.py
+    EXIT_CODE=$?
+    if [ $EXIT_CODE -eq 0 ]; then
+        echo -e "${GREEN}Server stopped cleanly.${NC}"
+        break
+    fi
+    echo ""
+    echo -e "${RED}Server exited with code $EXIT_CODE. Restarting in 5 seconds...${NC}"
+    echo -e "${YELLOW}(Press Ctrl+C to stop)${NC}"
+    sleep 5
+    echo -e "${GREEN}Restarting server...${NC}"
+    echo ""
+done

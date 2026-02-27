@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="refresh" content="{{ refresh_interval }}">
+    <!-- No meta-refresh: JavaScript handles refresh with retry logic -->
     <title>Shabbos Monitor</title>
     <style>
         :root {
@@ -407,6 +407,32 @@
             color: var(--text-muted);
         }
 
+        .reconnecting-banner {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            background: var(--accent-clay);
+            color: white;
+            text-align: center;
+            padding: 0.4rem;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            font-size: 0.75rem;
+            font-weight: 500;
+            z-index: 1000;
+            display: none;
+            animation: slideDown 0.3s ease;
+        }
+
+        .reconnecting-banner.visible {
+            display: block;
+        }
+
+        @keyframes slideDown {
+            from { transform: translateY(-100%); }
+            to { transform: translateY(0); }
+        }
+
         /* Scrollbar styling */
         .feed-content::-webkit-scrollbar {
             width: 4px;
@@ -426,7 +452,27 @@
         }
     </style>
 </head>
+<!-- Staleness badge macro: shows age-appropriate warning -->
+{% macro stale_badge(last_updated, generated_at) %}
+{% if last_updated %}
+    {% set age = ((generated_at - last_updated).total_seconds() / 60)|int %}
+    {% if age > 120 %}
+        <span class="stale-warning stale-severe">STALE {{ "%.1f"|format(age / 60) }}h</span>
+    {% elif age > 60 %}
+        <span class="stale-warning stale-severe">{{ "%.1f"|format(age / 60) }}h old</span>
+    {% elif age > 15 %}
+        <span class="stale-warning stale-severe">{{ age }}m old</span>
+    {% elif age > 7 %}
+        <span class="stale-warning stale-mild">{{ age }}m ago</span>
+    {% endif %}
+{% else %}
+    <span class="stale-warning stale-severe">No data</span>
+{% endif %}
+{% endmacro %}
 <body>
+    <div class="reconnecting-banner" id="reconnecting-banner">
+        Server unreachable — retrying... (data below is from last successful update)
+    </div>
     <header>
         <h1>Shabbos Situation Monitor</h1>
         <div class="status">
@@ -453,12 +499,7 @@
                 <span><span class="indicator"></span>Twitter</span>
                 <span class="feed-count">
                     {{ cache['twitter_list']['items']|length }}
-                    {% set lu = cache['twitter_list']['last_updated'] %}
-                    {% if lu %}
-                        {% set age = ((generated_at - lu).total_seconds() / 60)|int %}
-                        {% if age > 15 %}<span class="stale-warning stale-severe">{{ age }}m old</span>
-                        {% elif age > 7 %}<span class="stale-warning stale-mild">{{ age }}m ago</span>{% endif %}
-                    {% else %}<span class="stale-warning stale-severe">No data</span>{% endif %}
+                    {{ stale_badge(cache['twitter_list']['last_updated'], generated_at) }}
                 </span>
             </div>
             <div class="feed-content" id="twitter-scroll">
@@ -493,12 +534,7 @@
                 <span><span class="indicator"></span>Trump</span>
                 <span class="feed-count">
                     {{ cache['trump']['items']|length }}
-                    {% set lu = cache['trump']['last_updated'] %}
-                    {% if lu %}
-                        {% set age = ((generated_at - lu).total_seconds() / 60)|int %}
-                        {% if age > 15 %}<span class="stale-warning stale-severe">{{ age }}m old</span>
-                        {% elif age > 7 %}<span class="stale-warning stale-mild">{{ age }}m ago</span>{% endif %}
-                    {% else %}<span class="stale-warning stale-severe">No data</span>{% endif %}
+                    {{ stale_badge(cache['trump']['last_updated'], generated_at) }}
                 </span>
             </div>
             <div class="feed-content">
@@ -525,12 +561,7 @@
                 <span><span class="indicator"></span>Middle East</span>
                 <span class="feed-count">
                     {{ cache['reuters']['items']|length }}
-                    {% set lu = cache['reuters']['last_updated'] %}
-                    {% if lu %}
-                        {% set age = ((generated_at - lu).total_seconds() / 60)|int %}
-                        {% if age > 15 %}<span class="stale-warning stale-severe">{{ age }}m old</span>
-                        {% elif age > 7 %}<span class="stale-warning stale-mild">{{ age }}m ago</span>{% endif %}
-                    {% else %}<span class="stale-warning stale-severe">No data</span>{% endif %}
+                    {{ stale_badge(cache['reuters']['last_updated'], generated_at) }}
                 </span>
             </div>
             <div class="feed-content">
@@ -562,12 +593,7 @@
                 <span><span class="indicator"></span>Times of Israel</span>
                 <span class="feed-count">
                     {{ cache['toi_liveblog']['items']|length }}
-                    {% set lu = cache['toi_liveblog']['last_updated'] %}
-                    {% if lu %}
-                        {% set age = ((generated_at - lu).total_seconds() / 60)|int %}
-                        {% if age > 15 %}<span class="stale-warning stale-severe">{{ age }}m old</span>
-                        {% elif age > 7 %}<span class="stale-warning stale-mild">{{ age }}m ago</span>{% endif %}
-                    {% else %}<span class="stale-warning stale-severe">No data</span>{% endif %}
+                    {{ stale_badge(cache['toi_liveblog']['last_updated'], generated_at) }}
                 </span>
             </div>
             <div class="feed-content">
@@ -602,12 +628,7 @@
                 <span><span class="indicator"></span>Polymarket</span>
                 <span class="feed-count">
                     {{ cache['polymarket']['items']|length }}
-                    {% set lu = cache['polymarket']['last_updated'] %}
-                    {% if lu %}
-                        {% set age = ((generated_at - lu).total_seconds() / 60)|int %}
-                        {% if age > 15 %}<span class="stale-warning stale-severe">{{ age }}m old</span>
-                        {% elif age > 7 %}<span class="stale-warning stale-mild">{{ age }}m ago</span>{% endif %}
-                    {% else %}<span class="stale-warning stale-severe">No data</span>{% endif %}
+                    {{ stale_badge(cache['polymarket']['last_updated'], generated_at) }}
                 </span>
             </div>
             {% if shabbos_times %}
@@ -669,7 +690,43 @@
     </div>
 
     <script>
-        // Auto-scroll for Twitter column only
+        // ===== Smart refresh with retry (replaces fragile meta-refresh) =====
+        (function() {
+            const REFRESH_MS = {{ refresh_interval }} * 1000;
+            const RETRY_MS = 15000; // retry every 15s when server is down
+            const banner = document.getElementById('reconnecting-banner');
+            let failCount = 0;
+
+            function attemptRefresh() {
+                fetch('/health', { signal: AbortSignal.timeout(8000) })
+                    .then(function(r) {
+                        if (r.ok) {
+                            // Server is up — reload the page
+                            failCount = 0;
+                            location.reload();
+                        } else {
+                            onFail();
+                        }
+                    })
+                    .catch(function() {
+                        onFail();
+                    });
+            }
+
+            function onFail() {
+                failCount++;
+                banner.classList.add('visible');
+                banner.textContent = 'Server unreachable — retrying... attempt ' + failCount +
+                    ' (data below is from last successful update)';
+                // Retry on shorter interval when server is down
+                setTimeout(attemptRefresh, RETRY_MS);
+            }
+
+            // Schedule first refresh at normal interval
+            setTimeout(attemptRefresh, REFRESH_MS);
+        })();
+
+        // ===== Auto-scroll for Twitter column =====
         (function() {
             const twitterContent = document.getElementById('twitter-scroll');
             if (!twitterContent) return;
@@ -678,12 +735,10 @@
             const clientHeight = twitterContent.clientHeight;
             const maxScroll = scrollHeight - clientHeight;
 
-            if (maxScroll <= 0) return; // Nothing to scroll
+            if (maxScroll <= 0) return;
 
-            // Calculate scroll duration to complete before page refresh
-            // Page refreshes every {{ refresh_interval }} seconds, use 80% of that time
-            const totalDuration = {{ refresh_interval }} * 0.8 * 1000; // in ms
-            const scrollStep = 1; // pixels per step
+            const totalDuration = {{ refresh_interval }} * 0.8 * 1000;
+            const scrollStep = 1;
             const steps = maxScroll / scrollStep;
             const intervalTime = totalDuration / steps;
 
