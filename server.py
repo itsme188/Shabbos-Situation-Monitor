@@ -8,8 +8,11 @@ Run with: python server.py
 Or use: ./start.sh
 """
 
+import json
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
 from typing import Dict, List, Optional
 from html import unescape
 import re
@@ -24,17 +27,26 @@ from config import (
     HOST, PORT, DEBUG, REFRESH_INTERVAL,
     TWITTER_ACCOUNTS, TRUMP_TRUTH_RSS, TRUMP_TWITTER_MIRROR,
     REUTERS_MIDEAST_RSS,
-    NITTER_INSTANCES, TOI_RSS_URL, TOI_LIVEBLOG_URL,
-    POLYMARKET_EVENT_SLUG, POLYMARKET_API_URL,
+    NITTER_INSTANCES, NITTER_TIMEOUT, TOI_RSS_URL, TOI_LIVEBLOG_URL,
+    POLYMARKET_EVENT_SLUGS, POLYMARKET_API_URL,
     MAX_ITEMS_PER_FEED, REQUEST_TIMEOUT
 )
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+# Setup logging with rotation
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+_log_fmt = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+
+_console_handler = logging.StreamHandler()
+_console_handler.setFormatter(_log_fmt)
+logger.addHandler(_console_handler)
+
+_file_handler = RotatingFileHandler(
+    'server.log', maxBytes=5 * 1024 * 1024, backupCount=3
+)
+_file_handler.setFormatter(_log_fmt)
+logger.addHandler(_file_handler)
 
 # Flask app
 app = Flask(__name__)
@@ -47,6 +59,31 @@ cache: Dict = {
     "toi_liveblog": {"items": [], "last_updated": None, "error": None},
     "polymarket": {"items": [], "last_updated": None, "error": None},
 }
+
+# Nitter instance health tracking
+nitter_health: Dict[str, Dict] = {
+    instance: {"failures": 0, "last_success": None, "last_failure": None}
+    for instance in NITTER_INSTANCES
+}
+
+
+def get_healthy_nitter_instances() -> List[str]:
+    """Return Nitter instances sorted by health, best first."""
+    def score(instance):
+        h = nitter_health[instance]
+        last_ok = h["last_success"].timestamp() if h["last_success"] else 0
+        return (h["failures"], -last_ok)
+    return sorted(NITTER_INSTANCES, key=score)
+
+
+def record_nitter_success(instance: str):
+    nitter_health[instance]["failures"] = 0
+    nitter_health[instance]["last_success"] = datetime.now()
+
+
+def record_nitter_failure(instance: str):
+    nitter_health[instance]["failures"] += 1
+    nitter_health[instance]["last_failure"] = datetime.now()
 
 
 # ============ UTILITY FUNCTIONS ============
@@ -99,39 +136,51 @@ def fetch_twitter_accounts() -> None:
     logger.info("Fetching Twitter accounts...")
 
     all_items = []
+    account_status = {}
 
-    for username in TWITTER_ACCOUNTS:
-        items = fetch_single_twitter_account(username)
-        all_items.extend(items)
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        futures = {
+            executor.submit(fetch_single_twitter_account, username): username
+            for username in TWITTER_ACCOUNTS
+        }
+        for future in as_completed(futures, timeout=90):
+            username = futures[future]
+            try:
+                items = future.result()
+                all_items.extend(items)
+                account_status[username] = len(items) > 0
+            except Exception as e:
+                logger.warning(f"Twitter fetch for @{username} failed: {e}")
+                account_status[username] = False
 
     if all_items:
-        # Sort by timestamp (most recent first) and limit
         all_items.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
         cache["twitter_list"] = {
             "items": all_items[:MAX_ITEMS_PER_FEED],
             "last_updated": datetime.now(),
             "error": None,
+            "account_status": account_status,
         }
         logger.info(f"Got {len(all_items)} total items from Twitter accounts")
-    elif not cache["twitter_list"]["items"]:
-        cache["twitter_list"]["error"] = "Could not fetch any Twitter accounts"
+    else:
+        cache["twitter_list"]["account_status"] = account_status
+        if not cache["twitter_list"]["items"]:
+            cache["twitter_list"]["error"] = "Could not fetch any Twitter accounts"
         logger.warning("All Twitter account fetches failed")
 
 
 def fetch_single_twitter_account(username: str) -> List[Dict]:
-    """Fetch tweets from a single Twitter account by scraping the page."""
+    """Fetch tweets from a single Twitter account via multiple fallback methods."""
     logger.info(f"Fetching @{username}...")
 
-    # Try direct Twitter page scraping
+    # Method 1: Twitter syndication API
     url = f"https://syndication.twitter.com/srv/timeline-profile/screen-name/{username}"
-
     try:
         headers = {
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         }
         response = requests.get(url, timeout=REQUEST_TIMEOUT, headers=headers)
-
         if response.status_code == 200:
             items = parse_twitter_syndication(response.text, username)
             if items:
@@ -140,21 +189,58 @@ def fetch_single_twitter_account(username: str) -> List[Dict]:
     except Exception as e:
         logger.warning(f"Syndication fetch failed for @{username}: {e}")
 
-    # Fallback: Try Nitter instances
-    for instance in NITTER_INSTANCES[:2]:  # Only try first 2 to save time
+    # Method 2: Nitter RSS (more reliable parsing than HTML scraping)
+    items = fetch_twitter_via_nitter_rss(username)
+    if items:
+        logger.info(f"Got {len(items)} tweets from @{username} via Nitter RSS")
+        return items
+
+    # Method 3: Nitter HTML scraping (last resort)
+    for instance in get_healthy_nitter_instances()[:4]:
         try:
             nitter_url = f"https://{instance}/{username}"
-            response = safe_request(nitter_url)
+            response = safe_request(nitter_url, timeout=NITTER_TIMEOUT)
             if response:
                 items = parse_nitter_profile(response.text, username)
                 if items:
-                    logger.info(f"Got {len(items)} tweets from @{username} via Nitter")
+                    record_nitter_success(instance)
+                    logger.info(f"Got {len(items)} tweets from @{username} via {instance}")
                     return items
+            record_nitter_failure(instance)
         except Exception as e:
+            record_nitter_failure(instance)
             logger.debug(f"Nitter {instance} failed for @{username}: {e}")
             continue
 
     logger.warning(f"All methods failed for @{username}")
+    return []
+
+
+def fetch_twitter_via_nitter_rss(username: str) -> List[Dict]:
+    """Try fetching tweets via Nitter RSS feeds (more reliable than HTML scraping)."""
+    for instance in get_healthy_nitter_instances()[:3]:
+        try:
+            rss_url = f"https://{instance}/{username}/rss"
+            response = safe_request(rss_url, timeout=NITTER_TIMEOUT)
+            if response:
+                feed = feedparser.parse(response.content)
+                if feed.entries:
+                    record_nitter_success(instance)
+                    items = []
+                    for entry in feed.entries[:5]:
+                        items.append({
+                            "author": username,
+                            "text": clean_html(entry.get("title", "") or entry.get("description", ""))[:300],
+                            "timestamp": entry.get("published", ""),
+                            "timestamp_display": format_timestamp(entry.get("published", "")),
+                            "link": entry.get("link", f"https://twitter.com/{username}"),
+                        })
+                    if items:
+                        return items
+            record_nitter_failure(instance)
+        except Exception:
+            record_nitter_failure(instance)
+            continue
     return []
 
 
@@ -251,9 +337,9 @@ def fetch_trump() -> None:
 
     # Fallback: Try Twitter mirror account via Nitter
     logger.info("Trying Twitter mirror fallback for Trump...")
-    for instance in NITTER_INSTANCES:
+    for instance in get_healthy_nitter_instances()[:4]:
         url = f"https://{instance}/{TRUMP_TWITTER_MIRROR}/rss"
-        response = safe_request(url)
+        response = safe_request(url, timeout=NITTER_TIMEOUT)
         if response:
             feed = feedparser.parse(response.content)
             if feed.entries:
@@ -406,77 +492,96 @@ def parse_toi_liveblog(soup) -> List[Dict]:
 # ============ POLYMARKET FETCHER ============
 
 def fetch_polymarket() -> None:
-    """Fetch Polymarket prediction market odds."""
+    """Fetch Polymarket prediction market odds from multiple event slugs."""
     logger.info("Fetching Polymarket odds...")
 
-    url = f"{POLYMARKET_API_URL}?slug={POLYMARKET_EVENT_SLUG}"
-    response = safe_request(url)
+    all_items = []
 
-    if response:
+    for slug in POLYMARKET_EVENT_SLUGS:
+        url = f"{POLYMARKET_API_URL}?slug={slug}"
+        response = safe_request(url)
+        if not response:
+            continue
+
         try:
             data = response.json()
-            if data and len(data) > 0:
-                event = data[0]
-                markets = event.get("markets", [])
+            if not data or len(data) == 0:
+                continue
 
-                items = []
-                for market in markets:
-                    question = market.get("question", "")
-                    # Extract short title from groupItemTitle or question
-                    title = market.get("groupItemTitle", "")
-                    if not title:
-                        title = question[:50]
+            event = data[0]
+            markets = event.get("markets", [])
 
-                    # Parse outcome prices - format is '["0.17", "0.88"]' for [Yes, No]
-                    prices_str = market.get("outcomePrices", "[]")
-                    try:
-                        prices = eval(prices_str)  # Safe here as it's from API
-                        yes_price = float(prices[0]) if prices else 0
-                        probability = int(yes_price * 100)
-                    except:
-                        probability = 0
+            for market in markets:
+                question = market.get("question", "")
+                title = market.get("groupItemTitle", "")
+                if not title:
+                    title = question[:50]
 
-                    items.append({
-                        "title": title,
-                        "question": question,
-                        "probability": probability,
-                        "volume": market.get("volumeNum", 0),
-                        "link": f"https://polymarket.com/event/{POLYMARKET_EVENT_SLUG}",
-                    })
+                prices_str = market.get("outcomePrices", "[]")
+                try:
+                    prices = json.loads(prices_str)
+                    yes_price = float(prices[0]) if prices else 0
+                    probability = int(yes_price * 100)
+                except (json.JSONDecodeError, IndexError, ValueError):
+                    probability = 0
 
-                cache["polymarket"] = {
-                    "items": items,
-                    "last_updated": datetime.now(),
-                    "error": None,
-                    "event_title": event.get("title", "Iran Strike Markets"),
-                }
-                logger.info(f"Got {len(items)} Polymarket markets")
-                return
+                # Skip resolved/expired markets (exactly 0% or 100%)
+                if probability == 0 or probability == 100:
+                    continue
+
+                all_items.append({
+                    "title": title,
+                    "question": question,
+                    "probability": probability,
+                    "volume": market.get("volumeNum", 0),
+                    "link": f"https://polymarket.com/event/{slug}",
+                })
         except Exception as e:
-            logger.warning(f"Error parsing Polymarket data: {e}")
+            logger.warning(f"Error parsing Polymarket data for {slug}: {e}")
 
-    # Failed
-    if not cache["polymarket"]["items"]:
+    if all_items:
+        cache["polymarket"] = {
+            "items": all_items,
+            "last_updated": datetime.now(),
+            "error": None,
+            "event_title": "Prediction Markets",
+        }
+        logger.info(f"Got {len(all_items)} Polymarket markets")
+    elif not cache["polymarket"]["items"]:
         cache["polymarket"]["error"] = "Could not fetch Polymarket data"
-    logger.warning("Failed to fetch Polymarket")
+        logger.warning("Failed to fetch Polymarket")
 
 
 # ============ MAIN UPDATE FUNCTION ============
 
 def update_all_feeds() -> None:
-    """Update all feeds - called by scheduler."""
+    """Update all feeds concurrently - called by scheduler."""
     logger.info("=" * 50)
     logger.info("Starting feed update cycle")
-    logger.info("=" * 50)
+    start = datetime.now()
 
-    # Run fetchers (they handle their own errors)
-    fetch_twitter_accounts()
-    fetch_trump()
-    fetch_reuters()
-    fetch_toi()
-    fetch_polymarket()
+    fetchers = {
+        "twitter": fetch_twitter_accounts,
+        "trump": fetch_trump,
+        "reuters": fetch_reuters,
+        "toi": fetch_toi,
+        "polymarket": fetch_polymarket,
+    }
 
-    logger.info("Feed update cycle complete")
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {
+            executor.submit(fn): name
+            for name, fn in fetchers.items()
+        }
+        for future in as_completed(futures, timeout=120):
+            name = futures[future]
+            try:
+                future.result()
+            except Exception as e:
+                logger.error(f"Fetcher {name} raised exception: {e}")
+
+    elapsed = (datetime.now() - start).total_seconds()
+    logger.info(f"Feed update cycle complete in {elapsed:.1f}s")
     logger.info("=" * 50)
 
 

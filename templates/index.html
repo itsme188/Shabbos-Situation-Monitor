@@ -292,6 +292,66 @@
             color: var(--text-muted);
         }
 
+        .stale-warning {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            font-size: 0.6rem;
+            padding: 0.1rem 0.35rem;
+            border-radius: 2px;
+            font-weight: 500;
+            letter-spacing: 0.02em;
+        }
+
+        .stale-mild {
+            background: var(--accent-clay);
+            color: white;
+        }
+
+        .stale-severe {
+            background: var(--accent-dusty-rose);
+            color: white;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.6; }
+        }
+
+        .account-status-bar {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 3px;
+            padding: 0.4rem 0.75rem;
+            border-top: 1px solid var(--border-light);
+            background: var(--bg-header);
+        }
+
+        .acct-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+
+        .acct-ok { background: var(--accent-sage); }
+        .acct-fail { background: var(--accent-dusty-rose); }
+
+        .health-footer {
+            display: flex;
+            justify-content: center;
+            gap: 1.5rem;
+            padding: 0.75rem 1rem;
+            margin-top: 1rem;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            font-size: 0.65rem;
+            color: var(--text-muted);
+            border-top: 1px solid var(--border);
+        }
+
+        .health-footer span {
+            white-space: nowrap;
+        }
+
         .refresh-indicator {
             position: fixed;
             bottom: 1rem;
@@ -324,26 +384,16 @@
     <header>
         <h1>Shabbos Situation Monitor</h1>
         <div class="status">
+            {% for feed_key, feed_label in [('twitter_list', 'Twitter'), ('trump', 'Trump'), ('reuters', 'News'), ('toi_liveblog', 'TOI'), ('polymarket', 'Markets')] %}
+            {% set lu = cache[feed_key]['last_updated'] %}
+            {% set age = ((generated_at - lu).total_seconds() / 60)|int if lu else -1 %}
+            {% set has_items = cache[feed_key]['items']|length > 0 %}
+            {% set has_error = cache[feed_key].get('error') %}
             <span class="status-item">
-                <span class="status-dot {{ 'status-ok' if cache['twitter_list']['items'] and not cache['twitter_list']['error'] else ('status-warn' if cache['twitter_list']['items'] else 'status-error') }}"></span>
-                Twitter
+                <span class="status-dot {% if not has_items %}status-error{% elif has_error or age > 15 or age < 0 %}status-warn{% else %}status-ok{% endif %}"></span>
+                {{ feed_label }}
             </span>
-            <span class="status-item">
-                <span class="status-dot {{ 'status-ok' if cache['trump']['items'] and not cache['trump']['error'] else ('status-warn' if cache['trump']['items'] else 'status-error') }}"></span>
-                Trump
-            </span>
-            <span class="status-item">
-                <span class="status-dot {{ 'status-ok' if cache['reuters']['items'] and not cache['reuters']['error'] else ('status-warn' if cache['reuters']['items'] else 'status-error') }}"></span>
-                News
-            </span>
-            <span class="status-item">
-                <span class="status-dot {{ 'status-ok' if cache['toi_liveblog']['items'] and not cache['toi_liveblog']['error'] else ('status-warn' if cache['toi_liveblog']['items'] else 'status-error') }}"></span>
-                TOI
-            </span>
-            <span class="status-item">
-                <span class="status-dot {{ 'status-ok' if cache['polymarket']['items'] and not cache['polymarket']['error'] else ('status-warn' if cache['polymarket']['items'] else 'status-error') }}"></span>
-                Markets
-            </span>
+            {% endfor %}
             <span class="status-item" style="margin-left: 0.5rem; padding-left: 1rem; border-left: 1px solid var(--border);">
                 {{ generated_at.strftime('%H:%M') }}
             </span>
@@ -355,7 +405,15 @@
         <div class="feed">
             <div class="feed-header twitter-list">
                 <span><span class="indicator"></span>Twitter</span>
-                <span class="feed-count">{{ cache['twitter_list']['items']|length }}</span>
+                <span class="feed-count">
+                    {{ cache['twitter_list']['items']|length }}
+                    {% set lu = cache['twitter_list']['last_updated'] %}
+                    {% if lu %}
+                        {% set age = ((generated_at - lu).total_seconds() / 60)|int %}
+                        {% if age > 15 %}<span class="stale-warning stale-severe">{{ age }}m old</span>
+                        {% elif age > 7 %}<span class="stale-warning stale-mild">{{ age }}m ago</span>{% endif %}
+                    {% else %}<span class="stale-warning stale-severe">No data</span>{% endif %}
+                </span>
             </div>
             <div class="feed-content" id="twitter-scroll">
                 {% if cache['twitter_list']['error'] and not cache['twitter_list']['items'] %}
@@ -374,13 +432,28 @@
                     {% endfor %}
                 {% endif %}
             </div>
+            {% if cache['twitter_list'].get('account_status') %}
+            <div class="account-status-bar">
+                {% for acct, ok in cache['twitter_list']['account_status'].items() %}
+                <span class="acct-dot {{ 'acct-ok' if ok else 'acct-fail' }}" title="@{{ acct }}"></span>
+                {% endfor %}
+            </div>
+            {% endif %}
         </div>
 
         <!-- Trump Column -->
         <div class="feed">
             <div class="feed-header trump">
                 <span><span class="indicator"></span>Trump</span>
-                <span class="feed-count">{{ cache['trump']['items']|length }}</span>
+                <span class="feed-count">
+                    {{ cache['trump']['items']|length }}
+                    {% set lu = cache['trump']['last_updated'] %}
+                    {% if lu %}
+                        {% set age = ((generated_at - lu).total_seconds() / 60)|int %}
+                        {% if age > 15 %}<span class="stale-warning stale-severe">{{ age }}m old</span>
+                        {% elif age > 7 %}<span class="stale-warning stale-mild">{{ age }}m ago</span>{% endif %}
+                    {% else %}<span class="stale-warning stale-severe">No data</span>{% endif %}
+                </span>
             </div>
             <div class="feed-content">
                 {% if cache['trump']['error'] and not cache['trump']['items'] %}
@@ -404,7 +477,15 @@
         <div class="feed">
             <div class="feed-header iran">
                 <span><span class="indicator"></span>Middle East</span>
-                <span class="feed-count">{{ cache['reuters']['items']|length }}</span>
+                <span class="feed-count">
+                    {{ cache['reuters']['items']|length }}
+                    {% set lu = cache['reuters']['last_updated'] %}
+                    {% if lu %}
+                        {% set age = ((generated_at - lu).total_seconds() / 60)|int %}
+                        {% if age > 15 %}<span class="stale-warning stale-severe">{{ age }}m old</span>
+                        {% elif age > 7 %}<span class="stale-warning stale-mild">{{ age }}m ago</span>{% endif %}
+                    {% else %}<span class="stale-warning stale-severe">No data</span>{% endif %}
+                </span>
             </div>
             <div class="feed-content">
                 {% if cache['reuters']['error'] and not cache['reuters']['items'] %}
@@ -433,7 +514,15 @@
         <div class="feed">
             <div class="feed-header toi">
                 <span><span class="indicator"></span>Times of Israel</span>
-                <span class="feed-count">{{ cache['toi_liveblog']['items']|length }}</span>
+                <span class="feed-count">
+                    {{ cache['toi_liveblog']['items']|length }}
+                    {% set lu = cache['toi_liveblog']['last_updated'] %}
+                    {% if lu %}
+                        {% set age = ((generated_at - lu).total_seconds() / 60)|int %}
+                        {% if age > 15 %}<span class="stale-warning stale-severe">{{ age }}m old</span>
+                        {% elif age > 7 %}<span class="stale-warning stale-mild">{{ age }}m ago</span>{% endif %}
+                    {% else %}<span class="stale-warning stale-severe">No data</span>{% endif %}
+                </span>
             </div>
             <div class="feed-content">
                 {% if cache['toi_liveblog']['error'] and not cache['toi_liveblog']['items'] %}
@@ -465,7 +554,15 @@
         <div class="feed">
             <div class="feed-header polymarket">
                 <span><span class="indicator"></span>Polymarket</span>
-                <span class="feed-count">{{ cache['polymarket']['items']|length }}</span>
+                <span class="feed-count">
+                    {{ cache['polymarket']['items']|length }}
+                    {% set lu = cache['polymarket']['last_updated'] %}
+                    {% if lu %}
+                        {% set age = ((generated_at - lu).total_seconds() / 60)|int %}
+                        {% if age > 15 %}<span class="stale-warning stale-severe">{{ age }}m old</span>
+                        {% elif age > 7 %}<span class="stale-warning stale-mild">{{ age }}m ago</span>{% endif %}
+                    {% else %}<span class="stale-warning stale-severe">No data</span>{% endif %}
+                </span>
             </div>
             <div class="feed-content">
                 {% if cache['polymarket']['error'] and not cache['polymarket']['items'] %}
@@ -486,6 +583,20 @@
                 {% endif %}
             </div>
         </div>
+    </div>
+
+    <div class="health-footer">
+        {% for name, data in cache.items() %}
+        <span>
+            {{ name }}:
+            {{ data['items']|length }} items
+            {% if data['last_updated'] %}
+                ({{ ((generated_at - data['last_updated']).total_seconds() / 60)|int }}m ago)
+            {% else %}
+                (never)
+            {% endif %}
+        </span>
+        {% endfor %}
     </div>
 
     <div class="refresh-indicator">

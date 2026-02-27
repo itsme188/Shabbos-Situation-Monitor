@@ -49,15 +49,23 @@ NITTER_INSTANCES = [
 TOI_RSS_URL = "https://www.timesofisrael.com/feed/"
 TOI_LIVEBLOG_URL = "https://www.timesofisrael.com/liveblog/"
 
-# Polymarket - Iran strike prediction markets
-POLYMARKET_EVENT_SLUG = "what-will-the-usisrael-target-in-iran-by-january-31"
+# Polymarket - Iran/Israel prediction markets (ordered by nearest deadline)
+POLYMARKET_EVENT_SLUGS = [
+    "israel-strikes-iran-by-march-31-2026",
+    "us-strikes-iran-by-march-31-2026-393-881-954",
+    "israel-strikes-iran-by-june-30-2026",
+    "us-strikes-iran-by-june-30-2026",
+    "will-the-iranian-regime-fall-by-june-30",
+    "israel-x-iran-ceasefire-before-july",
+]
 POLYMARKET_API_URL = "https://gamma-api.polymarket.com/events"
 
 # Display settings
 MAX_ITEMS_PER_FEED = 15
 
 # Request settings
-REQUEST_TIMEOUT = 15  # seconds
+REQUEST_TIMEOUT = 15  # seconds - general
+NITTER_TIMEOUT = 8    # seconds - shorter for Nitter (responds fast or not at all)
 
 # twikit authentication (optional - for Iran search with like filter)
 # Run `python setup_twikit.py` once to authenticate
