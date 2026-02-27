@@ -53,6 +53,14 @@ TOI_LIVEBLOG_URL = "https://www.timesofisrael.com/liveblog/"
 POLYMARKET_EVENT_SLUG = "usisrael-strikes-iran-by"
 POLYMARKET_API_URL = "https://gamma-api.polymarket.com/events"
 
+# Shabbos timing - location & candle lighting
+LOCATION_LAT = 40.7128    # New York City
+LOCATION_LON = -74.0060
+LOCATION_TZ = "America/New_York"
+CANDLE_LIGHTING_OFFSET = 18  # minutes before sunset
+HAVDALAH_OFFSET = 50         # minutes after Saturday sunset
+SHABBOS_SNAPSHOT_FILE = "shabbos_snapshot.json"
+
 # Display settings
 MAX_ITEMS_PER_FEED = 15
 

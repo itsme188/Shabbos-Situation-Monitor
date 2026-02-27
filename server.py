@@ -10,12 +10,17 @@ Or use: ./start.sh
 
 import json
 import logging
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timedelta
 from logging.handlers import RotatingFileHandler
 from typing import Dict, List, Optional
 from html import unescape
+from zoneinfo import ZoneInfo
 import re
+
+from astral import LocationInfo
+from astral.sun import sun
 
 from flask import Flask, render_template
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -29,7 +34,9 @@ from config import (
     REUTERS_MIDEAST_RSS,
     NITTER_INSTANCES, NITTER_TIMEOUT, TOI_RSS_URL, TOI_LIVEBLOG_URL,
     POLYMARKET_EVENT_SLUG, POLYMARKET_API_URL,
-    MAX_ITEMS_PER_FEED, REQUEST_TIMEOUT
+    MAX_ITEMS_PER_FEED, REQUEST_TIMEOUT,
+    LOCATION_LAT, LOCATION_LON, LOCATION_TZ,
+    CANDLE_LIGHTING_OFFSET, HAVDALAH_OFFSET, SHABBOS_SNAPSHOT_FILE,
 )
 
 # Setup logging with rotation
@@ -59,6 +66,99 @@ cache: Dict = {
     "toi_liveblog": {"items": [], "last_updated": None, "error": None},
     "polymarket": {"items": [], "last_updated": None, "error": None},
 }
+
+# ============ SHABBOS TIME CALCULATIONS ============
+
+_tz = ZoneInfo(LOCATION_TZ)
+_observer = LocationInfo(
+    latitude=LOCATION_LAT, longitude=LOCATION_LON, timezone=LOCATION_TZ
+).observer
+
+
+def get_shabbos_times() -> Dict:
+    """Calculate candle lighting & havdalah for the current/upcoming Shabbos.
+
+    Finds the most recent Friday, computes sunset-based times, and if
+    we're already past havdalah, advances to next week.
+    """
+    now = datetime.now(_tz)
+    today = now.date()
+
+    # Find the most recent Friday (weekday 4) including today
+    days_since_friday = (today.weekday() - 4) % 7
+    friday = today - timedelta(days=days_since_friday)
+    saturday = friday + timedelta(days=1)
+
+    fri_sunset = sun(_observer, date=friday, tzinfo=_tz)["sunset"]
+    sat_sunset = sun(_observer, date=saturday, tzinfo=_tz)["sunset"]
+
+    candle_lighting = fri_sunset - timedelta(minutes=CANDLE_LIGHTING_OFFSET)
+    havdalah = sat_sunset + timedelta(minutes=HAVDALAH_OFFSET)
+
+    # If we're past this Shabbos, look ahead to next week
+    if now > havdalah:
+        friday = friday + timedelta(days=7)
+        saturday = friday + timedelta(days=1)
+        fri_sunset = sun(_observer, date=friday, tzinfo=_tz)["sunset"]
+        sat_sunset = sun(_observer, date=saturday, tzinfo=_tz)["sunset"]
+        candle_lighting = fri_sunset - timedelta(minutes=CANDLE_LIGHTING_OFFSET)
+        havdalah = sat_sunset + timedelta(minutes=HAVDALAH_OFFSET)
+
+    return {
+        "candle_lighting": candle_lighting,
+        "havdalah": havdalah,
+        "friday_date": friday,
+        "candle_lighting_display": candle_lighting.strftime("%-I:%M %p"),
+        "havdalah_display": havdalah.strftime("%-I:%M %p"),
+    }
+
+
+def is_shabbos() -> bool:
+    """Check if we're currently in the Shabbos window."""
+    times = get_shabbos_times()
+    now = datetime.now(_tz)
+    return times["candle_lighting"] <= now <= times["havdalah"]
+
+
+def save_shabbos_snapshot(probability: int, market_title: str) -> None:
+    """Persist the soonest market's probability at candle lighting."""
+    times = get_shabbos_times()
+    snapshot = {
+        "shabbos_friday": times["friday_date"].isoformat(),
+        "probability": probability,
+        "market_title": market_title,
+        "candle_lighting": times["candle_lighting"].isoformat(),
+    }
+    try:
+        with open(SHABBOS_SNAPSHOT_FILE, "w") as f:
+            json.dump(snapshot, f)
+        logger.info(f"Shabbos snapshot saved: {market_title} at {probability}%")
+    except Exception as e:
+        logger.warning(f"Failed to save Shabbos snapshot: {e}")
+
+
+def load_shabbos_snapshot() -> Optional[Dict]:
+    """Load the saved snapshot if it belongs to the current Shabbos."""
+    try:
+        with open(SHABBOS_SNAPSHOT_FILE) as f:
+            data = json.load(f)
+        times = get_shabbos_times()
+        if data.get("shabbos_friday") == times["friday_date"].isoformat():
+            return data
+    except (FileNotFoundError, json.JSONDecodeError, KeyError):
+        pass
+    return None
+
+
+def clear_expired_snapshot() -> None:
+    """Remove the snapshot file after Shabbos ends."""
+    try:
+        if os.path.exists(SHABBOS_SNAPSHOT_FILE):
+            os.remove(SHABBOS_SNAPSHOT_FILE)
+            logger.info("Cleared expired Shabbos snapshot")
+    except Exception as e:
+        logger.warning(f"Failed to clear Shabbos snapshot: {e}")
+
 
 # Nitter instance health tracking
 nitter_health: Dict[str, Dict] = {
@@ -586,6 +686,24 @@ def fetch_polymarket() -> None:
 
                 all_items.extend(dated_markets)
                 logger.info(f"Got {len(dated_markets)} active markets from {POLYMARKET_EVENT_SLUG}")
+
+                # --- Shabbos snapshot logic ---
+                if dated_markets:
+                    try:
+                        soonest = dated_markets[0]
+                        times = get_shabbos_times()
+                        now = datetime.now(_tz)
+
+                        if now >= times["candle_lighting"] and now <= times["havdalah"]:
+                            # We're in (or past) candle lighting - save snapshot if needed
+                            existing = load_shabbos_snapshot()
+                            if not existing:
+                                save_shabbos_snapshot(soonest["probability"], soonest["title"])
+                        elif now > times["havdalah"]:
+                            clear_expired_snapshot()
+                    except Exception as e:
+                        logger.debug(f"Shabbos snapshot check failed: {e}")
+
         except Exception as e:
             logger.warning(f"Error parsing Polymarket event data: {e}")
 
@@ -693,11 +811,33 @@ def update_all_feeds() -> None:
 @app.route("/")
 def dashboard():
     """Main dashboard page."""
+    # Compute Shabbos delta for soonest market
+    shabbos_delta = None
+    shabbos_times = None
+    try:
+        shabbos_times = get_shabbos_times()
+        snapshot = load_shabbos_snapshot()
+        if snapshot and cache["polymarket"]["items"]:
+            # Find the soonest non-trending market
+            for item in cache["polymarket"]["items"]:
+                if not item.get("is_trending"):
+                    shabbos_delta = {
+                        "current": item["probability"],
+                        "at_start": snapshot["probability"],
+                        "delta": item["probability"] - snapshot["probability"],
+                        "market_title": snapshot["market_title"],
+                    }
+                    break
+    except Exception as e:
+        logger.debug(f"Shabbos delta computation failed: {e}")
+
     return render_template(
         "index.html",
         cache=cache,
         generated_at=datetime.now(),
         refresh_interval=REFRESH_INTERVAL,
+        shabbos_delta=shabbos_delta,
+        shabbos_times=shabbos_times,
     )
 
 

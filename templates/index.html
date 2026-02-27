@@ -308,6 +308,36 @@
             color: var(--text-muted);
         }
 
+        .shabbos-delta {
+            display: inline-block;
+            font-family: 'JetBrains Mono', 'SF Mono', monospace;
+            font-size: 0.7rem;
+            font-weight: 600;
+            padding: 0.1rem 0.4rem;
+            border-radius: 3px;
+            margin-left: 0.4rem;
+        }
+        .shabbos-delta.delta-up {
+            color: var(--accent-dusty-rose);
+            background: rgba(176, 116, 112, 0.12);
+        }
+        .shabbos-delta.delta-down {
+            color: var(--accent-sage);
+            background: rgba(130, 150, 115, 0.12);
+        }
+        .shabbos-delta.delta-flat {
+            color: var(--text-muted);
+            background: rgba(128, 128, 128, 0.08);
+        }
+
+        .shabbos-info {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            font-size: 0.6rem;
+            color: var(--text-muted);
+            padding: 0.3rem 0;
+            letter-spacing: 0.03em;
+        }
+
         .stale-warning {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
             font-size: 0.6rem;
@@ -580,6 +610,11 @@
                     {% else %}<span class="stale-warning stale-severe">No data</span>{% endif %}
                 </span>
             </div>
+            {% if shabbos_times %}
+            <div class="shabbos-info">
+                Candle lighting {{ shabbos_times.candle_lighting_display }}
+            </div>
+            {% endif %}
             <div class="feed-content">
                 {% if cache['polymarket']['error'] and not cache['polymarket']['items'] %}
                     <div class="error-message">{{ cache['polymarket']['error'] }}</div>
@@ -596,6 +631,15 @@
                         <div class="market-title">{{ item.title }}</div>
                         <div class="probability {% if item.probability < 20 %}probability-low{% elif item.probability < 50 %}probability-med{% else %}probability-high{% endif %}">
                             {{ item.probability }}%
+                            {% if loop.first and shabbos_delta and not item.get('is_trending') %}
+                                {% if shabbos_delta.delta > 0 %}
+                                    <span class="shabbos-delta delta-up">+{{ shabbos_delta.delta }} since Shabbos</span>
+                                {% elif shabbos_delta.delta < 0 %}
+                                    <span class="shabbos-delta delta-down">{{ shabbos_delta.delta }} since Shabbos</span>
+                                {% else %}
+                                    <span class="shabbos-delta delta-flat">no change since Shabbos</span>
+                                {% endif %}
+                            {% endif %}
                         </div>
                         <div class="market-question">{{ item.question }}</div>
                         <div class="market-volume">${{ "{:,.0f}".format(item.volume) }} vol</div>
