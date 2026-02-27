@@ -28,7 +28,7 @@ from config import (
     TWITTER_ACCOUNTS, TRUMP_TRUTH_RSS, TRUMP_TWITTER_MIRROR,
     REUTERS_MIDEAST_RSS,
     NITTER_INSTANCES, NITTER_TIMEOUT, TOI_RSS_URL, TOI_LIVEBLOG_URL,
-    POLYMARKET_EVENT_SLUGS, POLYMARKET_API_URL,
+    POLYMARKET_EVENT_SLUG, POLYMARKET_API_URL,
     MAX_ITEMS_PER_FEED, REQUEST_TIMEOUT
 )
 
@@ -84,6 +84,23 @@ def record_nitter_success(instance: str):
 def record_nitter_failure(instance: str):
     nitter_health[instance]["failures"] += 1
     nitter_health[instance]["last_failure"] = datetime.now()
+
+
+# Nitter error patterns - these appear as RSS entry content when the instance
+# is broken but still returns valid RSS XML with an error message as the entry
+NITTER_ERROR_PATTERNS = [
+    "whitelisted",
+    "rate limited",
+    "not available",
+    "instance has been",
+    "error fetching",
+]
+
+
+def _is_nitter_error_content(text: str) -> bool:
+    """Check if text looks like a Nitter error message rather than a real tweet."""
+    text_lower = text.lower()
+    return any(pattern in text_lower for pattern in NITTER_ERROR_PATTERNS)
 
 
 # ============ UTILITY FUNCTIONS ============
@@ -225,6 +242,15 @@ def fetch_twitter_via_nitter_rss(username: str) -> List[Dict]:
             if response:
                 feed = feedparser.parse(response.content)
                 if feed.entries:
+                    # Check first entry for error content (e.g. "RSS reader not yet whitelisted")
+                    first_text = clean_html(
+                        feed.entries[0].get("title", "") or feed.entries[0].get("description", "")
+                    )
+                    if _is_nitter_error_content(first_text):
+                        logger.warning(f"Nitter RSS {instance} returned error content: {first_text[:80]}")
+                        record_nitter_failure(instance)
+                        continue
+
                     record_nitter_success(instance)
                     items = []
                     for entry in feed.entries[:5]:
@@ -343,6 +369,15 @@ def fetch_trump() -> None:
         if response:
             feed = feedparser.parse(response.content)
             if feed.entries:
+                # Check for Nitter error content
+                first_text = clean_html(
+                    feed.entries[0].get("title", "") or feed.entries[0].get("description", "")
+                )
+                if _is_nitter_error_content(first_text):
+                    logger.warning(f"Nitter RSS {instance} returned error for Trump: {first_text[:80]}")
+                    record_nitter_failure(instance)
+                    continue
+
                 items = []
                 for entry in feed.entries[:MAX_ITEMS_PER_FEED]:
                     title = entry.get("title", "")
@@ -492,61 +527,129 @@ def parse_toi_liveblog(soup) -> List[Dict]:
 # ============ POLYMARKET FETCHER ============
 
 def fetch_polymarket() -> None:
-    """Fetch Polymarket prediction market odds from multiple event slugs."""
+    """Fetch Polymarket odds: Iran strike event (soonest deadline) + top trending market."""
     logger.info("Fetching Polymarket odds...")
 
     all_items = []
 
-    for slug in POLYMARKET_EVENT_SLUGS:
-        url = f"{POLYMARKET_API_URL}?slug={slug}"
-        response = safe_request(url)
-        if not response:
-            continue
-
+    # === Primary: US/Israel strikes Iran event (auto-soonest deadline) ===
+    url = f"{POLYMARKET_API_URL}?slug={POLYMARKET_EVENT_SLUG}"
+    response = safe_request(url)
+    if response:
         try:
             data = response.json()
-            if not data or len(data) == 0:
-                continue
+            if data and len(data) > 0:
+                event = data[0]
+                markets = event.get("markets", [])
 
-            event = data[0]
-            markets = event.get("markets", [])
+                dated_markets = []
+                for market in markets:
+                    # Skip closed/resolved markets
+                    if market.get("closed"):
+                        continue
 
-            for market in markets:
-                question = market.get("question", "")
-                title = market.get("groupItemTitle", "")
-                if not title:
-                    title = question[:50]
+                    prices_str = market.get("outcomePrices", "[]")
+                    try:
+                        prices = json.loads(prices_str)
+                        yes_price = float(prices[0]) if prices else 0
+                        probability = int(yes_price * 100)
+                    except (json.JSONDecodeError, IndexError, ValueError):
+                        probability = 0
 
-                prices_str = market.get("outcomePrices", "[]")
-                try:
-                    prices = json.loads(prices_str)
-                    yes_price = float(prices[0]) if prices else 0
-                    probability = int(yes_price * 100)
-                except (json.JSONDecodeError, IndexError, ValueError):
-                    probability = 0
+                    if probability == 0 or probability == 100:
+                        continue
 
-                # Skip resolved/expired markets (exactly 0% or 100%)
-                if probability == 0 or probability == 100:
-                    continue
+                    title = market.get("groupItemTitle", "")
+                    question = market.get("question", "")
 
-                all_items.append({
-                    "title": title,
-                    "question": question,
-                    "probability": probability,
-                    "volume": market.get("volumeNum", 0),
-                    "link": f"https://polymarket.com/event/{slug}",
-                })
+                    # Parse date from groupItemTitle (e.g. "February 28")
+                    try:
+                        parsed = datetime.strptime(title, "%B %d")
+                        deadline = parsed.replace(year=datetime.now().year)
+                    except ValueError:
+                        deadline = datetime.max  # Unknown dates sort last
+
+                    dated_markets.append({
+                        "title": title,
+                        "question": question,
+                        "probability": probability,
+                        "volume": market.get("volumeNum", 0),
+                        "link": f"https://polymarket.com/event/{POLYMARKET_EVENT_SLUG}",
+                        "_deadline": deadline,
+                    })
+
+                # Sort by deadline (soonest first)
+                dated_markets.sort(key=lambda x: x["_deadline"])
+
+                for m in dated_markets:
+                    del m["_deadline"]
+
+                all_items.extend(dated_markets)
+                logger.info(f"Got {len(dated_markets)} active markets from {POLYMARKET_EVENT_SLUG}")
         except Exception as e:
-            logger.warning(f"Error parsing Polymarket data for {slug}: {e}")
+            logger.warning(f"Error parsing Polymarket event data: {e}")
+
+    # === Secondary: Top trending market on Polymarket (by 24h volume) ===
+    trending_url = f"{POLYMARKET_API_URL}?active=true&closed=false&order=volume24hr&ascending=false&limit=10"
+    response = safe_request(trending_url)
+    if response:
+        try:
+            data = response.json()
+            if data:
+                for event in data:
+                    slug = event.get("slug", "")
+                    if "strikes-iran" in slug or slug == POLYMARKET_EVENT_SLUG:
+                        continue
+
+                    title = event.get("title", "")
+                    markets = event.get("markets", [])
+                    if not markets:
+                        continue
+
+                    # Find highest-volume active sub-market
+                    best_market = None
+                    best_vol = 0
+                    for market in markets:
+                        if market.get("closed"):
+                            continue
+                        prices_str = market.get("outcomePrices", "[]")
+                        try:
+                            prices = json.loads(prices_str)
+                            yes_price = float(prices[0]) if prices else 0
+                            prob = int(yes_price * 100)
+                        except (json.JSONDecodeError, IndexError, ValueError):
+                            prob = 0
+                        if 0 < prob < 100:
+                            vol = market.get("volumeNum", 0)
+                            if vol > best_vol:
+                                best_market = (market, prob)
+                                best_vol = vol
+
+                    if not best_market:
+                        continue
+
+                    market, probability = best_market
+                    all_items.append({
+                        "title": f"TRENDING: {title}",
+                        "question": market.get("question", title),
+                        "probability": probability,
+                        "volume": market.get("volumeNum", 0),
+                        "link": f"https://polymarket.com/event/{slug}",
+                        "is_trending": True,
+                    })
+                    logger.info(f"Got trending market: {title}")
+                    break  # Only take the #1 trending market
+        except Exception as e:
+            logger.warning(f"Error fetching trending Polymarket data: {e}")
 
     if all_items:
         cache["polymarket"] = {
             "items": all_items,
             "last_updated": datetime.now(),
             "error": None,
-            "event_title": "Prediction Markets",
+            "event_title": "Iran Strike Markets",
         }
-        logger.info(f"Got {len(all_items)} Polymarket markets")
+        logger.info(f"Got {len(all_items)} total Polymarket markets")
     elif not cache["polymarket"]["items"]:
         cache["polymarket"]["error"] = "Could not fetch Polymarket data"
         logger.warning("Failed to fetch Polymarket")

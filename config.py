@@ -49,15 +49,8 @@ NITTER_INSTANCES = [
 TOI_RSS_URL = "https://www.timesofisrael.com/feed/"
 TOI_LIVEBLOG_URL = "https://www.timesofisrael.com/liveblog/"
 
-# Polymarket - Iran/Israel prediction markets (ordered by nearest deadline)
-POLYMARKET_EVENT_SLUGS = [
-    "israel-strikes-iran-by-march-31-2026",
-    "us-strikes-iran-by-march-31-2026-393-881-954",
-    "israel-strikes-iran-by-june-30-2026",
-    "us-strikes-iran-by-june-30-2026",
-    "will-the-iranian-regime-fall-by-june-30",
-    "israel-x-iran-ceasefire-before-july",
-]
+# Polymarket - Iran/Israel strike prediction market (multi-outcome, auto-soonest date)
+POLYMARKET_EVENT_SLUG = "usisrael-strikes-iran-by"
 POLYMARKET_API_URL = "https://gamma-api.polymarket.com/events"
 
 # Display settings

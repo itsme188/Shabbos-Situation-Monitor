@@ -286,6 +286,22 @@
             line-height: 1.4;
         }
 
+        .trending-separator {
+            border-top: 1px dashed var(--border);
+            margin: 0.5rem 0;
+            padding-top: 0.5rem;
+        }
+
+        .trending-label {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            font-size: 0.6rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--accent-clay);
+            margin-bottom: 0.3rem;
+        }
+
         .market-volume {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
             font-size: 0.7rem;
@@ -571,6 +587,11 @@
                     <div class="no-items">No markets available</div>
                 {% else %}
                     {% for item in cache['polymarket']['items'] %}
+                    {% if item.get('is_trending') %}
+                    <div class="trending-separator">
+                        <div class="trending-label">Top Trending</div>
+                    </div>
+                    {% endif %}
                     <div class="feed-item">
                         <div class="market-title">{{ item.title }}</div>
                         <div class="probability {% if item.probability < 20 %}probability-low{% elif item.probability < 50 %}probability-med{% else %}probability-high{% endif %}">
