@@ -482,6 +482,81 @@
         .feed-content::-webkit-scrollbar-thumb:hover {
             background: var(--text-muted);
         }
+
+        /* AI Toggle Switch */
+        .ai-controls {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .toggle-switch {
+            position: relative;
+            display: inline-block;
+            width: 32px;
+            height: 18px;
+            cursor: pointer;
+        }
+        .toggle-switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        .toggle-slider {
+            position: absolute;
+            inset: 0;
+            background: var(--border);
+            border-radius: 18px;
+            transition: background 0.2s;
+        }
+        .toggle-slider::before {
+            content: "";
+            position: absolute;
+            width: 14px;
+            height: 14px;
+            left: 2px;
+            bottom: 2px;
+            background: white;
+            border-radius: 50%;
+            transition: transform 0.2s;
+        }
+        .toggle-switch input:checked + .toggle-slider {
+            background: var(--accent-sage);
+        }
+        .toggle-switch input:checked + .toggle-slider::before {
+            transform: translateX(14px);
+        }
+        .ai-refresh-btn {
+            background: none;
+            border: 1px solid var(--border);
+            border-radius: 3px;
+            padding: 0.15rem 0.4rem;
+            font-size: 0.6rem;
+            color: var(--text-muted);
+            cursor: pointer;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            transition: all 0.15s;
+        }
+        .ai-refresh-btn:hover {
+            background: var(--bg-header);
+            color: var(--text-secondary);
+            border-color: var(--text-muted);
+        }
+        .ai-refresh-btn:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+        .ai-status-msg {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            line-height: 1.5;
+            padding: 0 0.25rem;
+        }
+        .ai-status-msg code {
+            background: var(--bg-header);
+            padding: 0.1rem 0.3rem;
+            border-radius: 3px;
+            font-size: 0.8rem;
+        }
     </style>
 </head>
 <!-- Staleness badge macro: shows age-appropriate warning -->
@@ -690,17 +765,30 @@
         <div class="feed">
             <div class="feed-header ai-summary">
                 <span><span class="indicator"></span>AI Summary</span>
-                <span class="feed-count">
-                    {% if cache.get('ai_summary') %}
-                        {{ cache['ai_summary']['items']|length }}
-                        {% if cache['ai_summary']['last_updated'] %}
-                            {{ stale_badge(cache['ai_summary']['last_updated'], generated_at) }}
-                        {% endif %}
+                <div class="ai-controls">
+                    {% if cache['ai_summary']['items'] %}
+                    <button class="ai-refresh-btn" id="ai-refresh-btn" onclick="refreshAI()" title="Refresh now">↻</button>
                     {% endif %}
-                </span>
+                    <label class="toggle-switch" title="Toggle AI summary on/off">
+                        <input type="checkbox" id="ai-toggle" {% if ai_summary_enabled %}checked{% endif %} onchange="toggleAI()">
+                        <span class="toggle-slider"></span>
+                    </label>
+                </div>
             </div>
             <div class="feed-content">
-                {% if not cache.get('ai_summary') or (cache['ai_summary']['error'] and not cache['ai_summary']['items']) %}
+                {% if not has_api_key %}
+                    <!-- No API key configured -->
+                    <div class="feed-item">
+                        <div class="ai-status-msg">
+                            <strong>API key needed</strong><br>
+                            Create a file called <code>.env</code> in the server folder with:<br><br>
+                            <code>ANTHROPIC_API_KEY=sk-ant-...</code><br><br>
+                            Then restart the server.
+                        </div>
+                    </div>
+                {% elif not ai_summary_enabled %}
+                    <div class="no-items">AI summary paused — flip the toggle to resume</div>
+                {% elif not cache.get('ai_summary') or (cache['ai_summary']['error'] and not cache['ai_summary']['items']) %}
                     <div class="no-items">{{ cache.get('ai_summary', {}).get('error', 'Summary not yet generated') }}</div>
                 {% elif not cache['ai_summary']['items'] %}
                     <div class="no-items">Summary not yet generated</div>
@@ -774,6 +862,40 @@
             // Schedule first refresh at normal interval
             setTimeout(attemptRefresh, REFRESH_MS);
         })();
+
+        // ===== AI Summary toggle and refresh =====
+        function toggleAI() {
+            fetch('/api/toggle-ai', { method: 'POST' })
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    // Reload page to reflect new state
+                    setTimeout(function() { location.reload(); }, 300);
+                })
+                .catch(function(err) {
+                    console.error('Toggle failed:', err);
+                });
+        }
+
+        function refreshAI() {
+            var btn = document.getElementById('ai-refresh-btn');
+            if (btn) {
+                btn.disabled = true;
+                btn.textContent = '...';
+            }
+            fetch('/api/refresh-ai', { method: 'POST' })
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    // Reload to show new summary
+                    location.reload();
+                })
+                .catch(function(err) {
+                    console.error('Refresh failed:', err);
+                    if (btn) {
+                        btn.disabled = false;
+                        btn.textContent = '↻';
+                    }
+                });
+        }
 
         // ===== Auto-scroll for Twitter column =====
         (function() {

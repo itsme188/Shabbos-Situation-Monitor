@@ -25,7 +25,7 @@ import re
 from astral import LocationInfo
 from astral.sun import sun
 
-from flask import Flask, render_template
+from flask import Flask, render_template, jsonify, request
 from apscheduler.schedulers.background import BackgroundScheduler
 import requests
 import feedparser
@@ -37,6 +37,22 @@ try:
     HAS_ANTHROPIC = True
 except ImportError:
     HAS_ANTHROPIC = False
+
+# Load .env file if present (so API key doesn't need terminal export)
+_env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+if os.path.exists(_env_path):
+    with open(_env_path) as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if _line and not _line.startswith("#") and "=" in _line:
+                _key, _, _val = _line.partition("=")
+                _key = _key.strip()
+                _val = _val.strip().strip('"').strip("'")
+                if _key and _val:
+                    os.environ.setdefault(_key, _val)
+
+# Runtime toggle for AI summary (can be flipped via dashboard without restart)
+ai_summary_enabled = True  # Toggled by /api/toggle-ai endpoint
 
 from config import (
     HOST, PORT, DEBUG, REFRESH_INTERVAL,
@@ -972,13 +988,19 @@ def fetch_polymarket() -> None:
 
 def fetch_ai_summary() -> None:
     """Use Claude API to digest all feed items into bullet-point headlines."""
+    global ai_summary_enabled
+
+    if not ai_summary_enabled:
+        cache["ai_summary"]["error"] = "AI summary paused (toggle on dashboard)"
+        return
+
     if not HAS_ANTHROPIC:
         cache["ai_summary"]["error"] = "anthropic package not installed"
         return
 
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
-        cache["ai_summary"]["error"] = "ANTHROPIC_API_KEY not set"
+        cache["ai_summary"]["error"] = "ANTHROPIC_API_KEY not set — add key to .env file"
         logger.warning("AI summary skipped: ANTHROPIC_API_KEY not set")
         return
 
@@ -1132,6 +1154,9 @@ def dashboard():
         refresh_interval=REFRESH_INTERVAL,
         shabbos_delta=shabbos_delta,
         shabbos_times=shabbos_times,
+        ai_summary_enabled=ai_summary_enabled,
+        has_anthropic=HAS_ANTHROPIC,
+        has_api_key=bool(os.environ.get("ANTHROPIC_API_KEY")),
     )
 
 
@@ -1156,6 +1181,43 @@ def manual_refresh():
     """Manually trigger a feed refresh."""
     update_all_feeds()
     return {"status": "refreshed", "time": datetime.now().isoformat()}
+
+
+@app.route("/api/toggle-ai", methods=["POST"])
+def toggle_ai():
+    """Toggle AI summary on/off at runtime (no restart needed)."""
+    global ai_summary_enabled
+    ai_summary_enabled = not ai_summary_enabled
+    status = "enabled" if ai_summary_enabled else "disabled"
+    logger.info(f"AI summary toggled: {status}")
+    return jsonify({"ai_enabled": ai_summary_enabled, "status": status})
+
+
+@app.route("/api/ai-status")
+def ai_status():
+    """Get current AI summary status for the dashboard toggle."""
+    has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    return jsonify({
+        "ai_enabled": ai_summary_enabled,
+        "has_anthropic": HAS_ANTHROPIC,
+        "has_api_key": has_key,
+        "last_updated": cache["ai_summary"]["last_updated"].isoformat() if cache["ai_summary"]["last_updated"] else None,
+        "error": cache["ai_summary"]["error"],
+        "item_count": len(cache["ai_summary"]["items"]),
+    })
+
+
+@app.route("/api/refresh-ai", methods=["POST"])
+def refresh_ai():
+    """Manually trigger an AI summary refresh."""
+    if not ai_summary_enabled:
+        return jsonify({"error": "AI summary is disabled"}), 400
+    fetch_ai_summary()
+    return jsonify({
+        "status": "refreshed",
+        "item_count": len(cache["ai_summary"]["items"]),
+        "error": cache["ai_summary"]["error"],
+    })
 
 
 # ============ MAIN ============
@@ -1215,30 +1277,34 @@ if __name__ == "__main__":
     watchdog.start()
     logger.info("Watchdog thread started")
 
-    # AI summary scheduler (separate from feed updates, hourly)
-    ai_enabled = HAS_ANTHROPIC and os.environ.get("ANTHROPIC_API_KEY")
-    if ai_enabled:
+    # AI summary scheduler (always registered — respects runtime toggle)
+    # The fetch_ai_summary() function itself checks ai_summary_enabled + API key
+    if HAS_ANTHROPIC:
         scheduler.add_job(
             fetch_ai_summary,
             "interval",
             seconds=AI_SUMMARY_INTERVAL,
             id="ai_summary_updater"
         )
-        logger.info(f"AI summary scheduler started (every {AI_SUMMARY_INTERVAL // 60} min)")
-    else:
-        if not HAS_ANTHROPIC:
-            logger.info("AI summary disabled: anthropic package not installed")
+        logger.info(f"AI summary scheduler registered (every {AI_SUMMARY_INTERVAL // 60} min)")
+        if os.environ.get("ANTHROPIC_API_KEY"):
+            logger.info("AI summary ready: API key found")
         else:
-            logger.info("AI summary disabled: ANTHROPIC_API_KEY not set")
+            logger.info("AI summary: no API key yet (add to .env or toggle will prompt)")
+    else:
+        logger.info("AI summary unavailable: anthropic package not installed")
 
     # Initial fetch on startup
     logger.info("Performing initial feed fetch...")
     update_all_feeds()
 
     # Generate initial AI summary after feeds are populated
-    if ai_enabled:
+    if HAS_ANTHROPIC and os.environ.get("ANTHROPIC_API_KEY"):
         logger.info("Generating initial AI summary...")
         fetch_ai_summary()
+
+    # AI status for startup message
+    _ai_status = "ready" if (HAS_ANTHROPIC and os.environ.get("ANTHROPIC_API_KEY")) else "no API key" if HAS_ANTHROPIC else "no package"
 
     # Print startup info
     print("\n" + "=" * 50)
@@ -1246,7 +1312,7 @@ if __name__ == "__main__":
     print("=" * 50)
     print(f"\n  Dashboard: http://localhost:{PORT}")
     print(f"  Refresh interval: {REFRESH_INTERVAL // 60} minutes")
-    print(f"  AI summary: {'enabled (every ' + str(AI_SUMMARY_INTERVAL // 60) + ' min)' if ai_enabled else 'disabled'}")
+    print(f"  AI summary: {_ai_status} (toggle on dashboard)")
     print(f"  Auto-restart: via start.sh")
     print(f"  Watchdog: active")
     print(f"\n  Press Ctrl+C to stop\n")

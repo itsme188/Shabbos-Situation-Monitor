@@ -15,6 +15,7 @@ shabbos_snapshot.json
 
 # Auth files (sensitive)
 twikit_cookies.json
+.env
 
 # OS files
 .DS_Store
