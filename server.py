@@ -31,16 +31,28 @@ import requests
 import feedparser
 from bs4 import BeautifulSoup
 
+# Conditional import: anthropic SDK is optional (graceful degradation)
+try:
+    import anthropic
+    HAS_ANTHROPIC = True
+except ImportError:
+    HAS_ANTHROPIC = False
+
 from config import (
     HOST, PORT, DEBUG, REFRESH_INTERVAL,
     TWITTER_ACCOUNTS, TRUMP_TRUTH_RSS, TRUMP_TWITTER_MIRROR,
     REUTERS_MIDEAST_RSS,
     NITTER_INSTANCES, NITTER_TIMEOUT, TOI_RSS_URL, TOI_LIVEBLOG_URL,
+    TOI_LIVEBLOG_DATE_PATTERN,
+    GOOGLE_NEWS_TWITTER_FALLBACK, TWITTER_TOPIC_QUERIES,
+    TWITTER_SYNDICATION_TIMEOUT, TWITTER_ACCOUNT_TIMEOUT,
     POLYMARKET_EVENT_SLUG, POLYMARKET_API_URL,
     MAX_ITEMS_PER_FEED, REQUEST_TIMEOUT,
     LOCATION_LAT, LOCATION_LON, LOCATION_TZ,
     CANDLE_LIGHTING_OFFSET, HAVDALAH_OFFSET, SHABBOS_SNAPSHOT_FILE,
     CACHE_FILE, CACHE_MAX_AGE,
+    AI_SUMMARY_INTERVAL, AI_SUMMARY_MODEL, AI_SUMMARY_MAX_TOKENS,
+    AI_SUMMARY_SYSTEM_PROMPT,
 )
 
 # Setup logging with rotation
@@ -59,6 +71,10 @@ _file_handler = RotatingFileHandler(
 _file_handler.setFormatter(_log_fmt)
 logger.addHandler(_file_handler)
 
+# Log anthropic SDK status
+if not HAS_ANTHROPIC:
+    logger.warning("anthropic package not installed - AI summary feature disabled")
+
 # Flask app
 app = Flask(__name__)
 
@@ -69,6 +85,7 @@ cache: Dict = {
     "reuters": {"items": [], "last_updated": None, "error": None},
     "toi_liveblog": {"items": [], "last_updated": None, "error": None},
     "polymarket": {"items": [], "last_updated": None, "error": None},
+    "ai_summary": {"items": [], "last_updated": None, "error": None},
 }
 
 
@@ -304,6 +321,26 @@ def clean_html(html_text: str) -> str:
     return unescape(text)
 
 
+def extract_text_with_links(html_text: str) -> str:
+    """Remove HTML tags but preserve link URLs inline.
+
+    For each <a href="URL">text</a>, outputs "text [URL]" so the
+    destination is visible in plain-text display.
+    """
+    if not html_text:
+        return ""
+    soup = BeautifulSoup(html_text, "html.parser")
+    for a_tag in soup.find_all("a", href=True):
+        href = a_tag["href"]
+        link_text = a_tag.get_text(strip=True)
+        if href and href != link_text:
+            a_tag.replace_with(f"{link_text} [{href}]")
+        else:
+            a_tag.replace_with(link_text or href or "")
+    text = soup.get_text(separator=" ", strip=True)
+    return unescape(text)
+
+
 def safe_request(url: str, timeout: int = REQUEST_TIMEOUT) -> Optional[requests.Response]:
     """Make a request with error handling."""
     try:
@@ -320,6 +357,10 @@ def safe_request(url: str, timeout: int = REQUEST_TIMEOUT) -> Optional[requests.
 
 # ============ TWITTER ACCOUNTS FETCHER ============
 
+# Track which fetch method last succeeded per account (optimization: try it first)
+_twitter_method_cache: Dict[str, str] = {}
+
+
 def fetch_twitter_accounts() -> None:
     """Fetch tweets from monitored Twitter accounts via web scraping."""
     logger.info("Fetching Twitter accounts...")
@@ -332,7 +373,7 @@ def fetch_twitter_accounts() -> None:
             executor.submit(fetch_single_twitter_account, username): username
             for username in TWITTER_ACCOUNTS
         }
-        for future in as_completed(futures, timeout=90):
+        for future in as_completed(futures, timeout=TWITTER_ACCOUNT_TIMEOUT):
             username = futures[future]
             try:
                 items = future.result()
@@ -352,39 +393,62 @@ def fetch_twitter_accounts() -> None:
         }
         logger.info(f"Got {len(all_items)} total items from Twitter accounts")
     else:
-        cache["twitter_list"]["account_status"] = account_status
-        if not cache["twitter_list"]["items"]:
-            cache["twitter_list"]["error"] = "Could not fetch any Twitter accounts"
-        logger.warning("All Twitter account fetches failed")
+        # 4th fallback: Google News RSS for the monitored topics
+        logger.info("All Twitter methods failed, trying Google News fallback...")
+        gnews_items = _fetch_twitter_google_news_fallback()
+        if gnews_items:
+            all_items = gnews_items
+            cache["twitter_list"] = {
+                "items": gnews_items[:MAX_ITEMS_PER_FEED],
+                "last_updated": datetime.now(),
+                "error": "Using Google News fallback (Twitter unavailable)",
+                "account_status": account_status,
+            }
+            logger.info(f"Got {len(gnews_items)} items from Google News fallback")
+        else:
+            cache["twitter_list"]["account_status"] = account_status
+            if not cache["twitter_list"]["items"]:
+                cache["twitter_list"]["error"] = "Could not fetch any Twitter accounts"
+            logger.warning("All Twitter account fetches failed (including Google News)")
 
 
-def fetch_single_twitter_account(username: str) -> List[Dict]:
-    """Fetch tweets from a single Twitter account via multiple fallback methods."""
-    logger.info(f"Fetching @{username}...")
+def _fetch_twitter_google_news_fallback() -> List[Dict]:
+    """Fallback: fetch related news from Google News RSS when Twitter is unavailable."""
+    all_items = []
+    for query in TWITTER_TOPIC_QUERIES:
+        url = GOOGLE_NEWS_TWITTER_FALLBACK.format(query=query.replace(" ", "+"))
+        response = safe_request(url, timeout=10)
+        if response:
+            feed = feedparser.parse(response.content)
+            for entry in feed.entries[:3]:
+                all_items.append({
+                    "author": "Google News",
+                    "text": entry.get("title", "")[:300],
+                    "timestamp": entry.get("published", ""),
+                    "timestamp_display": format_timestamp(entry.get("published", "")),
+                    "link": entry.get("link", ""),
+                })
+    return all_items
 
-    # Method 1: Twitter syndication API
+
+def _fetch_via_syndication(username: str) -> List[Dict]:
+    """Method 1: Twitter syndication API (fastest when available)."""
     url = f"https://syndication.twitter.com/srv/timeline-profile/screen-name/{username}"
     try:
         headers = {
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         }
-        response = requests.get(url, timeout=REQUEST_TIMEOUT, headers=headers)
+        response = requests.get(url, timeout=TWITTER_SYNDICATION_TIMEOUT, headers=headers)
         if response.status_code == 200:
-            items = parse_twitter_syndication(response.text, username)
-            if items:
-                logger.info(f"Got {len(items)} tweets from @{username} via syndication")
-                return items
+            return parse_twitter_syndication(response.text, username)
     except Exception as e:
-        logger.warning(f"Syndication fetch failed for @{username}: {e}")
+        logger.debug(f"Syndication failed for @{username}: {e}")
+    return []
 
-    # Method 2: Nitter RSS (more reliable parsing than HTML scraping)
-    items = fetch_twitter_via_nitter_rss(username)
-    if items:
-        logger.info(f"Got {len(items)} tweets from @{username} via Nitter RSS")
-        return items
 
-    # Method 3: Nitter HTML scraping (last resort)
+def _fetch_via_nitter_html(username: str) -> List[Dict]:
+    """Method 3: Nitter HTML scraping (last resort)."""
     for instance in get_healthy_nitter_instances()[:4]:
         try:
             nitter_url = f"https://{instance}/{username}"
@@ -393,12 +457,40 @@ def fetch_single_twitter_account(username: str) -> List[Dict]:
                 items = parse_nitter_profile(response.text, username)
                 if items:
                     record_nitter_success(instance)
-                    logger.info(f"Got {len(items)} tweets from @{username} via {instance}")
                     return items
             record_nitter_failure(instance)
         except Exception as e:
             record_nitter_failure(instance)
             logger.debug(f"Nitter {instance} failed for @{username}: {e}")
+            continue
+    return []
+
+
+def fetch_single_twitter_account(username: str) -> List[Dict]:
+    """Fetch tweets from a single account via multiple fallback methods."""
+    logger.info(f"Fetching @{username}...")
+
+    # Define methods in priority order
+    methods = [
+        ("syndication", lambda: _fetch_via_syndication(username)),
+        ("nitter_rss", lambda: fetch_twitter_via_nitter_rss(username)),
+        ("nitter_html", lambda: _fetch_via_nitter_html(username)),
+    ]
+
+    # Try last-successful method first (optimization)
+    last_ok = _twitter_method_cache.get(username)
+    if last_ok:
+        methods.sort(key=lambda m: 0 if m[0] == last_ok else 1)
+
+    for method_name, method_fn in methods:
+        try:
+            items = method_fn()
+            if items:
+                _twitter_method_cache[username] = method_name
+                logger.info(f"Got {len(items)} tweets from @{username} via {method_name}")
+                return items
+        except Exception as e:
+            logger.debug(f"{method_name} failed for @{username}: {e}")
             continue
 
     logger.warning(f"All methods failed for @{username}")
@@ -519,7 +611,7 @@ def fetch_trump() -> None:
 
                 items.append({
                     "author": "realDonaldTrump",
-                    "text": clean_html(content)[:400],
+                    "text": extract_text_with_links(content)[:500],
                     "timestamp": entry.get("published", ""),
                     "timestamp_display": format_timestamp(entry.get("published", "")),
                     "link": entry.get("link", ""),
@@ -614,15 +706,15 @@ def fetch_reuters() -> None:
 def fetch_toi() -> None:
     """Fetch Times of Israel from RSS and liveblog."""
     logger.info("Fetching Times of Israel...")
-    items = []
+    rss_items = []
+    liveblog_items = []
 
-    # Fetch RSS feed
+    # Fetch RSS feed (always, independent of liveblog)
     response = safe_request(TOI_RSS_URL)
     if response:
         feed = feedparser.parse(response.content)
-
         for entry in feed.entries[:10]:
-            items.append({
+            rss_items.append({
                 "title": entry.get("title", ""),
                 "summary": clean_html(entry.get("summary", ""))[:200],
                 "timestamp": entry.get("published", ""),
@@ -630,31 +722,51 @@ def fetch_toi() -> None:
                 "link": entry.get("link", ""),
                 "source": "rss",
             })
-        logger.info(f"Got {len(items)} items from TOI RSS")
+        logger.info(f"Got {len(rss_items)} items from TOI RSS")
 
-    # Try to fetch liveblog
-    response = safe_request(TOI_LIVEBLOG_URL)
-    if response:
-        soup = BeautifulSoup(response.content, "html.parser")
-        liveblog_items = parse_toi_liveblog(soup)
+    # Build list of liveblog URLs to try (base URL + date-specific)
+    liveblog_urls = [TOI_LIVEBLOG_URL]
+    try:
+        now = datetime.now()
+        yesterday = now - timedelta(days=1)
+        for dt in [now, yesterday]:
+            date_url = TOI_LIVEBLOG_DATE_PATTERN.format(
+                month=dt.strftime("%B").lower(),
+                day=dt.day,
+                year=dt.year,
+            )
+            if date_url not in liveblog_urls:
+                liveblog_urls.append(date_url)
+    except Exception as e:
+        logger.debug(f"Error building liveblog date URLs: {e}")
 
-        if liveblog_items:
-            # Prepend liveblog items (most recent)
-            items = liveblog_items + items
-            logger.info(f"Got {len(liveblog_items)} liveblog items from TOI")
+    # Try each liveblog URL until one works
+    for url in liveblog_urls:
+        response = safe_request(url)
+        if response:
+            soup = BeautifulSoup(response.content, "html.parser")
+            liveblog_items = parse_toi_liveblog(soup, url)
+            if liveblog_items:
+                logger.info(f"Got {len(liveblog_items)} liveblog items from {url}")
+                break
 
-    # Update cache
+    if not liveblog_items:
+        logger.warning(f"TOI liveblog: no items from any URL. Tried: {liveblog_urls}")
+
+    # Combine: liveblog items first, then RSS
+    items = liveblog_items + rss_items
+
     if items:
         cache["toi_liveblog"] = {
             "items": items[:MAX_ITEMS_PER_FEED],
             "last_updated": datetime.now(),
-            "error": None,
+            "error": None if liveblog_items else "Liveblog unavailable, showing RSS only",
         }
     elif not cache["toi_liveblog"]["items"]:
         cache["toi_liveblog"]["error"] = "Could not fetch TOI content"
 
 
-def parse_toi_liveblog(soup) -> List[Dict]:
+def parse_toi_liveblog(soup, source_url: str = "") -> List[Dict]:
     """Parse Times of Israel liveblog page."""
     items = []
 
@@ -666,13 +778,24 @@ def parse_toi_liveblog(soup) -> List[Dict]:
         ".lb-item",
         "[data-liveblog-entry]",
         ".timeline-entry",
+        # Additional selectors for potential TOI redesigns
+        ".liveblog__entry",
+        ".live-blog-entry",
+        "[data-entry-id]",
+        ".blog-entry",
     ]
 
     entries = []
     for selector in selectors:
         entries = soup.select(selector)
         if entries:
+            logger.info(f"TOI liveblog matched selector '{selector}' ({len(entries)} entries)")
             break
+
+    if not entries:
+        page_title = soup.title.string if soup.title else "N/A"
+        logger.warning(f"TOI liveblog: no CSS selectors matched. Page title: {page_title}, URL: {source_url}")
+        return []
 
     for entry in entries[:10]:
         try:
@@ -686,7 +809,7 @@ def parse_toi_liveblog(soup) -> List[Dict]:
                     "summary": content_elem.get_text(strip=True)[:250] if content_elem else "",
                     "timestamp": time_elem.get("datetime", "") if time_elem else "",
                     "timestamp_display": time_elem.get_text(strip=True) if time_elem else "LIVE",
-                    "link": TOI_LIVEBLOG_URL,
+                    "link": source_url or TOI_LIVEBLOG_URL,
                     "source": "liveblog",
                 })
         except Exception as e:
@@ -845,6 +968,101 @@ def fetch_polymarket() -> None:
         logger.warning("Failed to fetch Polymarket")
 
 
+# ============ AI SUMMARY FETCHER ============
+
+def fetch_ai_summary() -> None:
+    """Use Claude API to digest all feed items into bullet-point headlines."""
+    if not HAS_ANTHROPIC:
+        cache["ai_summary"]["error"] = "anthropic package not installed"
+        return
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        cache["ai_summary"]["error"] = "ANTHROPIC_API_KEY not set"
+        logger.warning("AI summary skipped: ANTHROPIC_API_KEY not set")
+        return
+
+    logger.info("Generating AI summary...")
+
+    # Gather all current feed content
+    feed_text_parts = []
+
+    for feed_name, feed_data in cache.items():
+        if feed_name == "ai_summary":
+            continue
+        items = feed_data.get("items", [])
+        if not items:
+            continue
+
+        feed_text_parts.append(f"\n--- {feed_name.upper()} ---")
+        for item in items[:10]:  # Limit per feed to control input size
+            parts = []
+            if item.get("author"):
+                parts.append(f"@{item['author']}")
+            if item.get("timestamp_display"):
+                parts.append(f"[{item['timestamp_display']}]")
+            if item.get("title"):
+                parts.append(item["title"])
+            if item.get("text"):
+                parts.append(item["text"][:200])
+            if item.get("summary"):
+                parts.append(item["summary"][:200])
+            if item.get("question"):
+                parts.append(f"Market: {item['question']} ({item.get('probability', '?')}%)")
+            feed_text_parts.append(" | ".join(parts))
+
+    if not feed_text_parts:
+        cache["ai_summary"]["error"] = "No feed data available to summarize"
+        return
+
+    feed_digest = "\n".join(feed_text_parts)
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        message = client.messages.create(
+            model=AI_SUMMARY_MODEL,
+            max_tokens=AI_SUMMARY_MAX_TOKENS,
+            system=AI_SUMMARY_SYSTEM_PROMPT,
+            messages=[{
+                "role": "user",
+                "content": f"Here are the current feed items. Summarize the key developments:\n\n{feed_digest}",
+            }],
+        )
+
+        summary_text = message.content[0].text
+
+        # Parse bullet points into items
+        bullets = []
+        for line in summary_text.strip().split("\n"):
+            line = line.strip()
+            if line and (line.startswith("-") or line.startswith("*") or line.startswith("[")):
+                cleaned = line.lstrip("-* ").strip()
+                bullets.append({
+                    "text": cleaned,
+                    "timestamp_display": datetime.now().strftime("%H:%M"),
+                })
+
+        if not bullets:
+            # If no bullet formatting, treat the whole response as one item
+            bullets = [{
+                "text": summary_text[:500],
+                "timestamp_display": datetime.now().strftime("%H:%M"),
+            }]
+
+        cache["ai_summary"] = {
+            "items": bullets,
+            "last_updated": datetime.now(),
+            "error": None,
+        }
+        logger.info(f"AI summary generated: {len(bullets)} bullet points")
+
+    except Exception as e:
+        logger.warning(f"AI summary error: {e}")
+        # Preserve previous cached summary on failure
+        if not cache["ai_summary"]["items"]:
+            cache["ai_summary"]["error"] = f"Summary unavailable: {str(e)[:80]}"
+
+
 # ============ MAIN UPDATE FUNCTION ============
 
 def update_all_feeds() -> None:
@@ -997,9 +1215,30 @@ if __name__ == "__main__":
     watchdog.start()
     logger.info("Watchdog thread started")
 
+    # AI summary scheduler (separate from feed updates, hourly)
+    ai_enabled = HAS_ANTHROPIC and os.environ.get("ANTHROPIC_API_KEY")
+    if ai_enabled:
+        scheduler.add_job(
+            fetch_ai_summary,
+            "interval",
+            seconds=AI_SUMMARY_INTERVAL,
+            id="ai_summary_updater"
+        )
+        logger.info(f"AI summary scheduler started (every {AI_SUMMARY_INTERVAL // 60} min)")
+    else:
+        if not HAS_ANTHROPIC:
+            logger.info("AI summary disabled: anthropic package not installed")
+        else:
+            logger.info("AI summary disabled: ANTHROPIC_API_KEY not set")
+
     # Initial fetch on startup
     logger.info("Performing initial feed fetch...")
     update_all_feeds()
+
+    # Generate initial AI summary after feeds are populated
+    if ai_enabled:
+        logger.info("Generating initial AI summary...")
+        fetch_ai_summary()
 
     # Print startup info
     print("\n" + "=" * 50)
@@ -1007,6 +1246,7 @@ if __name__ == "__main__":
     print("=" * 50)
     print(f"\n  Dashboard: http://localhost:{PORT}")
     print(f"  Refresh interval: {REFRESH_INTERVAL // 60} minutes")
+    print(f"  AI summary: {'enabled (every ' + str(AI_SUMMARY_INTERVAL // 60) + ' min)' if ai_enabled else 'disabled'}")
     print(f"  Auto-restart: via start.sh")
     print(f"  Watchdog: active")
     print(f"\n  Press Ctrl+C to stop\n")

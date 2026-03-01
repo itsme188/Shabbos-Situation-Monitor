@@ -45,9 +45,20 @@ NITTER_INSTANCES = [
     "nitter.kavin.rocks",
 ]
 
+# Twitter fallback: Google News RSS when all Twitter/Nitter methods fail
+GOOGLE_NEWS_TWITTER_FALLBACK = "https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
+TWITTER_TOPIC_QUERIES = [
+    "Israel Iran military",
+    "IDF breaking news",
+    "Middle East conflict today",
+]
+TWITTER_SYNDICATION_TIMEOUT = 8   # seconds (fail fast, move to Nitter)
+TWITTER_ACCOUNT_TIMEOUT = 60      # seconds (global timeout for all methods per batch)
+
 # Times of Israel
 TOI_RSS_URL = "https://www.timesofisrael.com/feed/"
 TOI_LIVEBLOG_URL = "https://www.timesofisrael.com/liveblog/"
+TOI_LIVEBLOG_DATE_PATTERN = "https://www.timesofisrael.com/liveblog-{month}-{day}-{year}/"
 
 # Polymarket - Iran/Israel strike prediction market (multi-outcome, auto-soonest date)
 POLYMARKET_EVENT_SLUG = "usisrael-strikes-iran-by"
@@ -75,3 +86,19 @@ NITTER_TIMEOUT = 8    # seconds - shorter for Nitter (responds fast or not at al
 # twikit authentication (optional - for Iran search with like filter)
 # Run `python setup_twikit.py` once to authenticate
 TWIKIT_COOKIES_FILE = "twikit_cookies.json"
+
+# AI Summary settings (requires ANTHROPIC_API_KEY environment variable)
+AI_SUMMARY_INTERVAL = 3600     # seconds (1 hour)
+AI_SUMMARY_MODEL = "claude-opus-4-6"
+AI_SUMMARY_MAX_TOKENS = 1024
+AI_SUMMARY_SYSTEM_PROMPT = """You are a concise news analyst monitoring the Middle East situation.
+Analyze the provided feed data and produce a bullet-point summary of the key developments.
+Rules:
+- Maximum 8 bullet points
+- Each bullet should be one clear sentence
+- Focus on NEW developments, not background
+- If multiple sources report the same event, note that
+- Highlight any escalation/de-escalation signals
+- Start each bullet with a category tag: [Military], [Diplomatic], [Political], [Breaking]
+- If nothing significant is happening, say so briefly
+"""
