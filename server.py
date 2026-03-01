@@ -49,7 +49,10 @@ if os.path.exists(_env_path):
                 _key = _key.strip()
                 _val = _val.strip().strip('"').strip("'")
                 if _key and _val:
-                    os.environ.setdefault(_key, _val)
+                    # Use direct set — setdefault won't override empty values
+                    # (Claude Code sets ANTHROPIC_API_KEY="" in env)
+                    if not os.environ.get(_key):
+                        os.environ[_key] = _val
 
 # Runtime toggle for AI summary (can be flipped via dashboard without restart)
 ai_summary_enabled = True  # Toggled by /api/toggle-ai endpoint
