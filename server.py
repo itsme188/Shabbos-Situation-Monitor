@@ -62,16 +62,18 @@ from config import (
     TWITTER_ACCOUNTS, TRUMP_TRUTH_RSS, TRUMP_TWITTER_MIRROR,
     REUTERS_MIDEAST_RSS,
     NITTER_INSTANCES, NITTER_TIMEOUT, TOI_RSS_URL, TOI_LIVEBLOG_URL,
-    TOI_LIVEBLOG_DATE_PATTERN,
+    TOI_LIVEBLOG_DATE_PATTERNS,
     GOOGLE_NEWS_TWITTER_FALLBACK, TWITTER_TOPIC_QUERIES,
-    TWITTER_SYNDICATION_TIMEOUT, TWITTER_ACCOUNT_TIMEOUT,
+    TWITTER_SYNDICATION_TIMEOUT, TWITTER_ACCOUNT_TIMEOUT, XCANCEL_USER_AGENT,
+    BLUESKY_HANDLES, BLUESKY_API_BASE,
     POLYMARKET_EVENT_SLUG, POLYMARKET_API_URL,
     MAX_ITEMS_PER_FEED, REQUEST_TIMEOUT,
     LOCATION_LAT, LOCATION_LON, LOCATION_TZ,
     CANDLE_LIGHTING_OFFSET, HAVDALAH_OFFSET, SHABBOS_SNAPSHOT_FILE,
     CACHE_FILE, CACHE_MAX_AGE,
-    AI_SUMMARY_INTERVAL, AI_SUMMARY_MODEL, AI_SUMMARY_MAX_TOKENS,
-    AI_SUMMARY_SYSTEM_PROMPT,
+    AI_SUMMARY_INTERVAL, AI_SUMMARY_HOURLY_MODEL, AI_SUMMARY_OVERVIEW_MODEL,
+    AI_SUMMARY_MAX_TOKENS, AI_SUMMARY_OVERVIEW_INTERVAL,
+    AI_SUMMARY_HOURLY_PROMPT, AI_SUMMARY_OVERVIEW_PROMPT,
 )
 
 # Setup logging with rotation
@@ -104,7 +106,14 @@ cache: Dict = {
     "reuters": {"items": [], "last_updated": None, "error": None},
     "toi_liveblog": {"items": [], "last_updated": None, "error": None},
     "polymarket": {"items": [], "last_updated": None, "error": None},
-    "ai_summary": {"items": [], "last_updated": None, "error": None},
+    "ai_summary": {
+        "items": [],
+        "last_updated": None,
+        "error": None,
+        "hourly_summaries": [],   # Accumulated hourly summary blocks
+        "overview": None,         # "Last 12 Hours" overview paragraph
+        "overview_updated": None, # When overview was last generated
+    },
 }
 
 
@@ -119,11 +128,20 @@ def save_cache_to_disk() -> None:
     try:
         serializable = {}
         for feed_name, feed_data in cache.items():
-            serializable[feed_name] = {
+            entry = {
                 "items": feed_data["items"],
                 "last_updated": feed_data["last_updated"].isoformat() if feed_data["last_updated"] else None,
                 "error": feed_data["error"],
             }
+            # AI summary has extra fields to persist
+            if feed_name == "ai_summary":
+                entry["hourly_summaries"] = feed_data.get("hourly_summaries", [])
+                entry["overview"] = feed_data.get("overview")
+                ou = feed_data.get("overview_updated")
+                entry["overview_updated"] = (
+                    ou.isoformat() if isinstance(ou, datetime) else ou
+                )
+            serializable[feed_name] = entry
         # Atomic write: write to temp file in same directory, then rename
         dir_name = os.path.dirname(os.path.abspath(CACHE_FILE))
         fd, tmp_path = tempfile.mkstemp(dir=dir_name, suffix=".tmp")
@@ -167,6 +185,14 @@ def load_cache_from_disk() -> bool:
                 cache[feed_name]["error"] = feed_data.get("error")
                 if feed_data.get("last_updated"):
                     cache[feed_name]["last_updated"] = datetime.fromisoformat(feed_data["last_updated"])
+                # Restore AI summary history
+                if feed_name == "ai_summary":
+                    cache[feed_name]["hourly_summaries"] = feed_data.get("hourly_summaries", [])
+                    cache[feed_name]["overview"] = feed_data.get("overview")
+                    ou = feed_data.get("overview_updated")
+                    cache[feed_name]["overview_updated"] = (
+                        datetime.fromisoformat(ou) if ou else None
+                    )
                 loaded_count += 1
         logger.info(f"Loaded {loaded_count} feeds from disk cache ({age/60:.1f}m old)")
         return loaded_count > 0
@@ -409,10 +435,11 @@ def fetch_twitter_accounts() -> None:
             "last_updated": datetime.now(),
             "error": None,
             "account_status": account_status,
+            "source": "twitter",
         }
         logger.info(f"Got {len(all_items)} total items from Twitter accounts")
     else:
-        # 4th fallback: Google News RSS for the monitored topics
+        # 5th fallback: Google News RSS for the monitored topics
         logger.info("All Twitter methods failed, trying Google News fallback...")
         gnews_items = _fetch_twitter_google_news_fallback()
         if gnews_items:
@@ -420,12 +447,14 @@ def fetch_twitter_accounts() -> None:
             cache["twitter_list"] = {
                 "items": gnews_items[:MAX_ITEMS_PER_FEED],
                 "last_updated": datetime.now(),
-                "error": "Using Google News fallback (Twitter unavailable)",
+                "error": "Twitter unavailable — showing OSINT news via Google News",
                 "account_status": account_status,
+                "source": "google_news",
             }
             logger.info(f"Got {len(gnews_items)} items from Google News fallback")
         else:
             cache["twitter_list"]["account_status"] = account_status
+            cache["twitter_list"]["source"] = "none"
             if not cache["twitter_list"]["items"]:
                 cache["twitter_list"]["error"] = "Could not fetch any Twitter accounts"
             logger.warning("All Twitter account fetches failed (including Google News)")
@@ -440,9 +469,16 @@ def _fetch_twitter_google_news_fallback() -> List[Dict]:
         if response:
             feed = feedparser.parse(response.content)
             for entry in feed.entries[:3]:
+                # Google News titles use format "Headline - Source Name"
+                title = entry.get("title", "")
+                source = "News"
+                if " - " in title:
+                    parts = title.rsplit(" - ", 1)
+                    title = parts[0]
+                    source = parts[1] if len(parts) > 1 else "News"
                 all_items.append({
-                    "author": "Google News",
-                    "text": entry.get("title", "")[:300],
+                    "author": source,
+                    "text": title[:300],
                     "timestamp": entry.get("published", ""),
                     "timestamp_display": format_timestamp(entry.get("published", "")),
                     "link": entry.get("link", ""),
@@ -466,8 +502,42 @@ def _fetch_via_syndication(username: str) -> List[Dict]:
     return []
 
 
+def _fetch_via_bluesky(username: str) -> List[Dict]:
+    """Method 2: BlueSky AT Protocol API (public, no auth needed)."""
+    bsky_handle = BLUESKY_HANDLES.get(username)
+    if not bsky_handle:
+        return []  # This account isn't on BlueSky
+    try:
+        url = f"{BLUESKY_API_BASE}/app.bsky.feed.getAuthorFeed?actor={bsky_handle}&limit=10"
+        response = requests.get(url, timeout=8)
+        response.raise_for_status()
+        data = response.json()
+
+        items = []
+        for entry in data.get("feed", []):
+            post = entry.get("post", {})
+            record = post.get("record", {})
+            text = record.get("text", "").strip()
+            if not text:
+                continue
+            created_at = record.get("createdAt", "")
+            items.append({
+                "author": username,
+                "text": text[:300],
+                "timestamp": created_at,
+                "timestamp_display": format_timestamp(created_at),
+                "link": f"https://bsky.app/profile/{bsky_handle}",
+            })
+        if items:
+            logger.info(f"BlueSky got {len(items)} posts for @{username}")
+        return items
+    except Exception as e:
+        logger.debug(f"BlueSky failed for @{username}: {e}")
+        return []
+
+
 def _fetch_via_nitter_html(username: str) -> List[Dict]:
-    """Method 3: Nitter HTML scraping (last resort)."""
+    """Method 4: Nitter HTML scraping (last resort)."""
     for instance in get_healthy_nitter_instances()[:4]:
         try:
             nitter_url = f"https://{instance}/{username}"
@@ -492,6 +562,7 @@ def fetch_single_twitter_account(username: str) -> List[Dict]:
     # Define methods in priority order
     methods = [
         ("syndication", lambda: _fetch_via_syndication(username)),
+        ("bluesky", lambda: _fetch_via_bluesky(username)),
         ("nitter_rss", lambda: fetch_twitter_via_nitter_rss(username)),
         ("nitter_html", lambda: _fetch_via_nitter_html(username)),
     ]
@@ -521,7 +592,21 @@ def fetch_twitter_via_nitter_rss(username: str) -> List[Dict]:
     for instance in get_healthy_nitter_instances()[:3]:
         try:
             rss_url = f"https://{instance}/{username}/rss"
-            response = safe_request(rss_url, timeout=NITTER_TIMEOUT)
+            # xcancel.com requires "mistique" User-Agent for RSS access
+            if "xcancel" in instance:
+                try:
+                    response = requests.get(
+                        rss_url,
+                        timeout=NITTER_TIMEOUT,
+                        headers={"User-Agent": XCANCEL_USER_AGENT},
+                    )
+                    response.raise_for_status()
+                except Exception as e:
+                    logger.debug(f"xcancel RSS failed for @{username}: {e}")
+                    record_nitter_failure(instance)
+                    continue
+            else:
+                response = safe_request(rss_url, timeout=NITTER_TIMEOUT)
             if response:
                 feed = feedparser.parse(response.content)
                 if feed.entries:
@@ -752,18 +837,20 @@ def fetch_toi() -> None:
         logger.info(f"Got {len(rss_items)} items from TOI RSS")
 
     # Build list of liveblog URLs to try (base URL + date-specific)
+    # Use Israel time since TOI publishes on Israel schedule
     liveblog_urls = [TOI_LIVEBLOG_URL]
     try:
-        now = datetime.now()
-        yesterday = now - timedelta(days=1)
-        for dt in [now, yesterday]:
-            date_url = TOI_LIVEBLOG_DATE_PATTERN.format(
-                month=dt.strftime("%B").lower(),
-                day=dt.day,
-                year=dt.year,
-            )
-            if date_url not in liveblog_urls:
-                liveblog_urls.append(date_url)
+        now_israel = datetime.now(ZoneInfo("Asia/Jerusalem"))
+        yesterday_israel = now_israel - timedelta(days=1)
+        for dt in [now_israel, yesterday_israel]:
+            for pattern in TOI_LIVEBLOG_DATE_PATTERNS:
+                date_url = pattern.format(
+                    month=dt.strftime("%B").lower(),
+                    day=dt.day,
+                    year=dt.year,
+                )
+                if date_url not in liveblog_urls:
+                    liveblog_urls.append(date_url)
     except Exception as e:
         logger.debug(f"Error building liveblog date URLs: {e}")
 
@@ -789,8 +876,14 @@ def fetch_toi() -> None:
             "last_updated": datetime.now(),
             "error": None if liveblog_items else "Liveblog unavailable, showing RSS only",
         }
-    elif not cache["toi_liveblog"]["items"]:
-        cache["toi_liveblog"]["error"] = "Could not fetch TOI content"
+    else:
+        # Both liveblog and RSS failed — clear stale items so dashboard
+        # doesn't show hours-old content that looks current
+        cache["toi_liveblog"] = {
+            "items": [],
+            "last_updated": cache["toi_liveblog"].get("last_updated"),
+            "error": "Could not fetch TOI content",
+        }
 
 
 def parse_toi_liveblog(soup, source_url: str = "") -> List[Dict]:
@@ -819,16 +912,34 @@ def parse_toi_liveblog(soup, source_url: str = "") -> List[Dict]:
             logger.info(f"TOI liveblog matched selector '{selector}' ({len(entries)} entries)")
             break
 
+    # Structural fallback: find containers holding liveblog_entry links
+    if not entries:
+        entry_links = soup.select('a[href*="liveblog_entry"], a[href*="liveblog-entry"]')
+        if entry_links:
+            seen_parents = set()
+            for link in entry_links:
+                parent = link.find_parent(["article", "div", "section", "li"])
+                if parent and id(parent) not in seen_parents:
+                    seen_parents.add(id(parent))
+                    entries.append(parent)
+            if entries:
+                logger.info(f"TOI liveblog: structural fallback found {len(entries)} entries via liveblog_entry links")
+
     if not entries:
         page_title = soup.title.string if soup.title else "N/A"
-        logger.warning(f"TOI liveblog: no CSS selectors matched. Page title: {page_title}, URL: {source_url}")
+        body = soup.find("body")
+        body_classes = body.get("class", []) if body else []
+        logger.warning(
+            f"TOI liveblog: no selectors matched. Title: {page_title}, "
+            f"URL: {source_url}, body classes: {body_classes}"
+        )
         return []
 
     for entry in entries[:10]:
         try:
-            time_elem = entry.select_one("time, .timestamp, .time, .lb-time, .entry-time")
+            time_elem = entry.select_one("time, .timestamp, .time, .lb-time, .entry-time, [datetime]")
             content_elem = entry.select_one(".content, .entry-content, p, .lb-content, .entry-text")
-            title_elem = entry.select_one("h2, h3, .entry-title, .headline")
+            title_elem = entry.select_one("h2, h3, h4, .entry-title, .headline")
 
             if content_elem or title_elem:
                 items.append({
@@ -997,8 +1108,138 @@ def fetch_polymarket() -> None:
 
 # ============ AI SUMMARY FETCHER ============
 
+
+def _parse_ai_bullets(summary_text: str) -> List[Dict]:
+    """Parse AI-generated summary text into structured bullet points."""
+    bullets = []
+    time_pattern = re.compile(r'^\[([^\]]+)\]\s*(\d{1,2}:\d{2})\s*[-\u2013\u2014]\s*(.+)$')
+    gen_time = datetime.now(ZoneInfo("America/New_York")).strftime("%H:%M")
+
+    for line in summary_text.strip().split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        cleaned = line.lstrip("-*\u2022 ").strip()
+        if not cleaned:
+            continue
+
+        match = time_pattern.match(cleaned)
+        if match:
+            category, event_time, description = match.groups()
+            bullets.append({
+                "text": f"[{category}] {description.strip()}",
+                "timestamp_display": event_time,
+                "category": category,
+            })
+        elif cleaned.startswith("["):
+            bullets.append({
+                "text": cleaned,
+                "timestamp_display": gen_time,
+                "category": "",
+            })
+
+    if not bullets:
+        bullets = [{
+            "text": summary_text[:500],
+            "timestamp_display": gen_time,
+            "category": "",
+        }]
+
+    # Sort bullets chronologically by timestamp_display
+    bullets.sort(key=lambda b: b.get("timestamp_display", "99:99"))
+    return bullets
+
+
+def _get_overview_age_hours() -> Optional[float]:
+    """Return hours since last overview was generated, or None if never."""
+    overview_updated = cache["ai_summary"].get("overview_updated")
+    if overview_updated is None:
+        return None
+    if isinstance(overview_updated, str):
+        overview_updated = datetime.fromisoformat(overview_updated)
+    return (datetime.now() - overview_updated).total_seconds() / 3600
+
+
+def _generate_overview(client) -> None:
+    """Generate the 'Last 12 Hours' overview paragraph from accumulated hourly summaries."""
+    summaries = cache["ai_summary"].get("hourly_summaries", [])
+    if len(summaries) < 2:
+        return  # Not enough data for a meaningful overview
+
+    # Build digest from last 12 hours of hourly summaries
+    overview_parts = []
+    for entry in summaries[:12]:
+        overview_parts.append(f"\n--- {entry['hour_label']} ---")
+        for bullet in entry.get("bullets", []):
+            overview_parts.append(f"  {bullet['timestamp_display']} {bullet['text']}")
+
+    overview_input = "\n".join(overview_parts)
+
+    try:
+        message = client.messages.create(
+            model=AI_SUMMARY_OVERVIEW_MODEL,
+            max_tokens=512,
+            system=AI_SUMMARY_OVERVIEW_PROMPT,
+            messages=[{
+                "role": "user",
+                "content": f"Here are the hourly summaries from the last several hours:\n\n{overview_input}",
+            }],
+        )
+
+        now = datetime.now()
+        now_et = datetime.now(ZoneInfo("America/New_York"))
+
+        cache["ai_summary"]["overview"] = {
+            "text": message.content[0].text.strip(),
+            "generated_at": now.isoformat(),
+            "generated_at_display": now_et.strftime("%-I:%M %p ET"),
+        }
+        cache["ai_summary"]["overview_updated"] = now
+        logger.info("AI overview (Last 12 Hours) regenerated")
+
+    except Exception as e:
+        logger.warning(f"AI overview generation failed: {e}")
+
+
+def _build_feed_digest() -> str:
+    """Gather all current feed content into a text digest for AI summarization."""
+    now_et = datetime.now(ZoneInfo("America/New_York"))
+    now_israel = datetime.now(ZoneInfo("Asia/Jerusalem"))
+
+    feed_text_parts = [
+        f"Current time: {now_et.strftime('%-I:%M %p')} ET (New York) / "
+        f"{now_israel.strftime('%H:%M')} Israel time"
+    ]
+
+    for feed_name, feed_data in cache.items():
+        if feed_name == "ai_summary":
+            continue
+        items = feed_data.get("items", [])
+        if not items:
+            continue
+
+        feed_text_parts.append(f"\n--- {feed_name.upper()} ---")
+        for item in items[:10]:
+            parts = []
+            if item.get("author"):
+                parts.append(f"@{item['author']}")
+            if item.get("timestamp_display"):
+                parts.append(f"[{item['timestamp_display']}]")
+            if item.get("title"):
+                parts.append(item["title"])
+            if item.get("text"):
+                parts.append(item["text"][:200])
+            if item.get("summary"):
+                parts.append(item["summary"][:200])
+            if item.get("question"):
+                parts.append(f"Market: {item['question']} ({item.get('probability', '?')}%)")
+            feed_text_parts.append(" | ".join(parts))
+
+    return "\n".join(feed_text_parts) if len(feed_text_parts) > 1 else ""
+
+
 def fetch_ai_summary() -> None:
-    """Use Claude API to digest all feed items into bullet-point headlines."""
+    """Generate hourly AI summary and accumulate in history."""
     global ai_summary_enabled
 
     if not ai_summary_enabled:
@@ -1015,47 +1256,19 @@ def fetch_ai_summary() -> None:
         logger.warning("AI summary skipped: ANTHROPIC_API_KEY not set")
         return
 
-    logger.info("Generating AI summary...")
+    logger.info("Generating hourly AI summary...")
 
-    # Gather all current feed content
-    feed_text_parts = []
-
-    for feed_name, feed_data in cache.items():
-        if feed_name == "ai_summary":
-            continue
-        items = feed_data.get("items", [])
-        if not items:
-            continue
-
-        feed_text_parts.append(f"\n--- {feed_name.upper()} ---")
-        for item in items[:10]:  # Limit per feed to control input size
-            parts = []
-            if item.get("author"):
-                parts.append(f"@{item['author']}")
-            if item.get("timestamp_display"):
-                parts.append(f"[{item['timestamp_display']}]")
-            if item.get("title"):
-                parts.append(item["title"])
-            if item.get("text"):
-                parts.append(item["text"][:200])
-            if item.get("summary"):
-                parts.append(item["summary"][:200])
-            if item.get("question"):
-                parts.append(f"Market: {item['question']} ({item.get('probability', '?')}%)")
-            feed_text_parts.append(" | ".join(parts))
-
-    if not feed_text_parts:
+    feed_digest = _build_feed_digest()
+    if not feed_digest:
         cache["ai_summary"]["error"] = "No feed data available to summarize"
         return
-
-    feed_digest = "\n".join(feed_text_parts)
 
     try:
         client = anthropic.Anthropic(api_key=api_key)
         message = client.messages.create(
-            model=AI_SUMMARY_MODEL,
+            model=AI_SUMMARY_HOURLY_MODEL,
             max_tokens=AI_SUMMARY_MAX_TOKENS,
-            system=AI_SUMMARY_SYSTEM_PROMPT,
+            system=AI_SUMMARY_HOURLY_PROMPT,
             messages=[{
                 "role": "user",
                 "content": f"Here are the current feed items. Summarize the key developments:\n\n{feed_digest}",
@@ -1063,54 +1276,41 @@ def fetch_ai_summary() -> None:
         )
 
         summary_text = message.content[0].text
+        bullets = _parse_ai_bullets(summary_text)
 
-        # Parse bullet points into items, extracting per-event timestamps
-        # Expected format: [Category] HH:MM - description
-        bullets = []
-        time_pattern = re.compile(r'^\[([^\]]+)\]\s*(\d{1,2}:\d{2})\s*[-–—]\s*(.+)$')
-        gen_time = datetime.now().strftime("%H:%M")
+        # Build hourly summary object
+        gen_time = datetime.now()
+        gen_et = datetime.now(ZoneInfo("America/New_York"))
+        hour_start = gen_et.replace(minute=0, second=0, microsecond=0)
+        hour_end = hour_start + timedelta(hours=1)
 
-        for line in summary_text.strip().split("\n"):
-            line = line.strip()
-            if not line:
-                continue
-            # Strip leading bullet markers
-            cleaned = line.lstrip("-*• ").strip()
-            if not cleaned:
-                continue
-
-            match = time_pattern.match(cleaned)
-            if match:
-                category, event_time, description = match.groups()
-                bullets.append({
-                    "text": f"[{category}] {description.strip()}",
-                    "timestamp_display": event_time,
-                })
-            elif cleaned.startswith("["):
-                # Has category tag but no time — use generation time
-                bullets.append({
-                    "text": cleaned,
-                    "timestamp_display": gen_time,
-                })
-
-        if not bullets:
-            # If no bullet formatting, treat the whole response as one item
-            bullets = [{
-                "text": summary_text[:500],
-                "timestamp_display": datetime.now().strftime("%H:%M"),
-            }]
-
-        cache["ai_summary"] = {
-            "items": bullets,
-            "last_updated": datetime.now(),
-            "error": None,
+        hourly_entry = {
+            "generated_at": gen_time.isoformat(),
+            "generated_at_display": gen_et.strftime("%-I:%M %p ET"),
+            "hour_label": f"{hour_start.strftime('%-I:%M')}-{hour_end.strftime('%-I:%M %p')} ET",
+            "bullets": bullets,
         }
-        logger.info(f"AI summary generated: {len(bullets)} bullet points")
+
+        # Accumulate: prepend new entry, cap at 24 entries
+        summaries = cache["ai_summary"].get("hourly_summaries", [])
+        summaries.insert(0, hourly_entry)
+        summaries = summaries[:24]
+
+        cache["ai_summary"]["hourly_summaries"] = summaries
+        cache["ai_summary"]["items"] = bullets  # Backward compat
+        cache["ai_summary"]["last_updated"] = gen_time
+        cache["ai_summary"]["error"] = None
+
+        logger.info(f"Hourly AI summary: {len(bullets)} bullets, {len(summaries)} total hours in history")
+
+        # Check if overview needs regeneration
+        overview_age = _get_overview_age_hours()
+        if overview_age is None or overview_age >= AI_SUMMARY_OVERVIEW_INTERVAL:
+            _generate_overview(client)
 
     except Exception as e:
         logger.warning(f"AI summary error: {e}")
-        # Preserve previous cached summary on failure
-        if not cache["ai_summary"]["items"]:
+        if not cache["ai_summary"].get("hourly_summaries") and not cache["ai_summary"]["items"]:
             cache["ai_summary"]["error"] = f"Summary unavailable: {str(e)[:80]}"
 
 

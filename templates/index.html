@@ -557,6 +557,15 @@
             border-radius: 3px;
             font-size: 0.8rem;
         }
+        /* AI Overview pinned section */
+        .ai-overview {
+            border-bottom: 2px solid var(--border) !important;
+            padding-bottom: 0.75rem !important;
+            margin-bottom: 0.25rem;
+        }
+        .ai-hour-block {
+            padding-bottom: 0.5rem !important;
+        }
     </style>
 </head>
 <!-- Staleness badge macro: shows age-appropriate warning -->
@@ -635,7 +644,14 @@
         <!-- Twitter Accounts Column -->
         <div class="feed">
             <div class="feed-header twitter-list">
-                <span><span class="indicator"></span>Twitter</span>
+                <span>
+                    <span class="indicator"></span>
+                    {% if cache['twitter_list'].get('source') == 'google_news' %}
+                        OSINT News <span style="font-size: 0.6rem; font-weight: 400; text-transform: none;">(Twitter offline)</span>
+                    {% else %}
+                        Twitter
+                    {% endif %}
+                </span>
                 <span class="feed-count">
                     {{ cache['twitter_list']['items']|length }}
                     {{ stale_badge(cache['twitter_list']['last_updated'], generated_at) }}
@@ -766,18 +782,15 @@
             <div class="feed-header ai-summary">
                 <span><span class="indicator"></span>AI Summary</span>
                 <div class="ai-controls">
-                    {% if cache['ai_summary']['items'] %}
                     <button class="ai-refresh-btn" id="ai-refresh-btn" onclick="refreshAI()" title="Refresh now">↻</button>
-                    {% endif %}
                     <label class="toggle-switch" title="Toggle AI summary on/off">
                         <input type="checkbox" id="ai-toggle" {% if ai_summary_enabled %}checked{% endif %} onchange="toggleAI()">
                         <span class="toggle-slider"></span>
                     </label>
                 </div>
             </div>
-            <div class="feed-content">
+            <div class="feed-content" id="ai-scroll">
                 {% if not has_api_key %}
-                    <!-- No API key configured -->
                     <div class="feed-item">
                         <div class="ai-status-msg">
                             <strong>API key needed</strong><br>
@@ -788,23 +801,49 @@
                     </div>
                 {% elif not ai_summary_enabled %}
                     <div class="no-items">AI summary paused — flip the toggle to resume</div>
-                {% elif not cache.get('ai_summary') or (cache['ai_summary']['error'] and not cache['ai_summary']['items']) %}
+                {% elif not cache.get('ai_summary') or (cache['ai_summary']['error'] and not cache['ai_summary'].get('hourly_summaries') and not cache['ai_summary']['items']) %}
                     <div class="no-items">{{ cache.get('ai_summary', {}).get('error', 'Summary not yet generated') }}</div>
-                {% elif not cache['ai_summary']['items'] %}
-                    <div class="no-items">Summary not yet generated</div>
                 {% else %}
-                    {% for item in cache['ai_summary']['items'] %}
-                    <div class="feed-item">
+                    {# === Overview: "Last 12 Hours" pinned section === #}
+                    {% if cache['ai_summary'].get('overview') %}
+                    <div class="feed-item ai-overview">
                         <div class="item-meta">
-                            <span class="item-time">{{ item.timestamp_display }}</span>
+                            <span class="item-author" style="font-weight: 600; letter-spacing: 0.05em;">LAST 12 HOURS</span>
+                            <span class="item-time">{{ cache['ai_summary']['overview']['generated_at_display'] }}</span>
                         </div>
-                        <div class="item-text">{{ item.text }}</div>
+                        <div class="item-text" style="font-style: italic; line-height: 1.5; opacity: 0.85;">
+                            {{ cache['ai_summary']['overview']['text'] }}
+                        </div>
                     </div>
-                    {% endfor %}
-                    {% if cache['ai_summary']['last_updated'] %}
-                    <div class="feed-item" style="text-align: center; color: var(--text-muted); font-size: 0.7rem; border-bottom: none;">
-                        Generated {{ cache['ai_summary']['last_updated'].strftime('%H:%M') }}
-                    </div>
+                    {% endif %}
+
+                    {# === Hourly summaries (newest first) === #}
+                    {% if cache['ai_summary'].get('hourly_summaries') %}
+                        {% for hour_block in cache['ai_summary']['hourly_summaries'] %}
+                        <div class="feed-item ai-hour-block">
+                            <div class="item-meta">
+                                <span class="item-author" style="font-size: 0.65rem; letter-spacing: 0.03em;">{{ hour_block.hour_label }}</span>
+                            </div>
+                            {% for bullet in hour_block.bullets %}
+                            <div style="margin-bottom: 0.25rem; font-size: 0.8rem; line-height: 1.4;">
+                                <span class="item-time" style="margin-right: 0.25rem;">{{ bullet.timestamp_display }}</span>
+                                {{ bullet.text }}
+                            </div>
+                            {% endfor %}
+                        </div>
+                        {% endfor %}
+                    {% elif cache['ai_summary']['items'] %}
+                        {# Backward compat: old format without hourly blocks #}
+                        {% for item in cache['ai_summary']['items'] %}
+                        <div class="feed-item">
+                            <div class="item-meta">
+                                <span class="item-time">{{ item.timestamp_display }}</span>
+                            </div>
+                            <div class="item-text">{{ item.text }}</div>
+                        </div>
+                        {% endfor %}
+                    {% else %}
+                        <div class="no-items">Summary not yet generated</div>
                     {% endif %}
                 {% endif %}
             </div>
@@ -900,13 +939,13 @@
                 });
         }
 
-        // ===== Auto-scroll for Twitter column =====
-        (function() {
-            const twitterContent = document.getElementById('twitter-scroll');
-            if (!twitterContent) return;
+        // ===== Auto-scroll for feed columns =====
+        function setupAutoScroll(elementId) {
+            const el = document.getElementById(elementId);
+            if (!el) return;
 
-            const scrollHeight = twitterContent.scrollHeight;
-            const clientHeight = twitterContent.clientHeight;
+            const scrollHeight = el.scrollHeight;
+            const clientHeight = el.clientHeight;
             const maxScroll = scrollHeight - clientHeight;
 
             if (maxScroll <= 0) return;
@@ -933,9 +972,11 @@
                         scrollingDown = true;
                     }
                 }
-                twitterContent.scrollTop = currentScroll;
+                el.scrollTop = currentScroll;
             }, intervalTime);
-        })();
+        }
+        setupAutoScroll('twitter-scroll');
+        setupAutoScroll('ai-scroll');
     </script>
 </body>
 </html>

@@ -55,10 +55,25 @@ TWITTER_TOPIC_QUERIES = [
 TWITTER_SYNDICATION_TIMEOUT = 8   # seconds (fail fast, move to Nitter)
 TWITTER_ACCOUNT_TIMEOUT = 60      # seconds (global timeout for all methods per batch)
 
+# xcancel.com requires this specific User-Agent for RSS feeds
+XCANCEL_USER_AGENT = "mistique"
+
+# BlueSky (AT Protocol) — open API, no auth needed for public posts
+# Map Twitter usernames to BlueSky handles for accounts that cross-post
+BLUESKY_HANDLES = {
+    "sentdefender": "sentdefender.bsky.social",
+    # Add more OSINT accounts as they join BlueSky
+}
+BLUESKY_API_BASE = "https://public.api.bsky.app/xrpc"
+
 # Times of Israel
 TOI_RSS_URL = "https://www.timesofisrael.com/feed/"
 TOI_LIVEBLOG_URL = "https://www.timesofisrael.com/liveblog/"
-TOI_LIVEBLOG_DATE_PATTERN = "https://www.timesofisrael.com/liveblog-{month}-{day}-{year}/"
+# Try both zero-padded and non-padded day formats (TOI URL structure varies)
+TOI_LIVEBLOG_DATE_PATTERNS = [
+    "https://www.timesofisrael.com/liveblog-{month}-{day}-{year}/",
+    "https://www.timesofisrael.com/liveblog-{month}-{day:02d}-{year}/",
+]
 
 # Polymarket - Iran/Israel strike prediction market (multi-outcome, auto-soonest date)
 POLYMARKET_EVENT_SLUG = "usisrael-strikes-iran-by"
@@ -89,9 +104,12 @@ TWIKIT_COOKIES_FILE = "twikit_cookies.json"
 
 # AI Summary settings (requires ANTHROPIC_API_KEY environment variable)
 AI_SUMMARY_INTERVAL = 3600     # seconds (1 hour)
-AI_SUMMARY_MODEL = "claude-opus-4-6"
+AI_SUMMARY_HOURLY_MODEL = "claude-haiku-4-5-20251001"  # Fast/cheap for hourly summaries
+AI_SUMMARY_OVERVIEW_MODEL = "claude-opus-4-6"           # Best quality for 12-hour overview
 AI_SUMMARY_MAX_TOKENS = 1024
-AI_SUMMARY_SYSTEM_PROMPT = """You are a concise news analyst monitoring the Middle East situation.
+AI_SUMMARY_OVERVIEW_INTERVAL = 3  # hours between overview regeneration
+
+AI_SUMMARY_HOURLY_PROMPT = """You are a concise news analyst monitoring the Middle East situation.
 Analyze the provided feed data and produce a bullet-point summary of the key developments.
 Rules:
 - Maximum 8 bullet points
@@ -99,10 +117,23 @@ Rules:
 - Focus on NEW developments, not background
 - If multiple sources report the same event, note that
 - Highlight any escalation/de-escalation signals
-- Start each bullet with a category tag AND event time: [Category] HH:MM - description
+- Start each bullet with a category tag AND event time in ET: [Category] HH:MM - description
   Example: [Military] 14:30 - IDF confirmed strikes on targets in southern Lebanon
   Example: [Breaking] 19:45 - Al Jazeera reports Iranian retaliation underway
-- Use the timestamps from the feed data to determine event times
+- The current time context is provided at the top of the feed data
+- Convert all event times to ET (Eastern Time) for consistency
 - Valid categories: Military, Diplomatic, Political, Breaking, Markets
 - If nothing significant is happening, say so briefly
+"""
+
+AI_SUMMARY_OVERVIEW_PROMPT = """You are a concise news analyst. Given several hours of bullet-point summaries about the Middle East situation, write a single paragraph (3-5 sentences) that captures the big picture.
+
+Rules:
+- Summarize the overall trajectory: is the situation escalating, de-escalating, or stable?
+- Mention the 2-3 most significant developments
+- Note any major shifts or turning points
+- Write in present tense for ongoing situations
+- Keep it under 100 words
+- Do NOT use bullet points — write a flowing paragraph
+- All times should be in ET (Eastern Time)
 """
