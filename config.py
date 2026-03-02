@@ -99,6 +99,10 @@ Rules:
 - Focus on NEW developments, not background
 - If multiple sources report the same event, note that
 - Highlight any escalation/de-escalation signals
-- Start each bullet with a category tag: [Military], [Diplomatic], [Political], [Breaking]
+- Start each bullet with a category tag AND event time: [Category] HH:MM - description
+  Example: [Military] 14:30 - IDF confirmed strikes on targets in southern Lebanon
+  Example: [Breaking] 19:45 - Al Jazeera reports Iranian retaliation underway
+- Use the timestamps from the feed data to determine event times
+- Valid categories: Military, Diplomatic, Political, Breaking, Markets
 - If nothing significant is happening, say so briefly
 """
