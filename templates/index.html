@@ -83,7 +83,7 @@
 
         .grid {
             display: grid;
-            grid-template-columns: repeat(4, 1fr);
+            grid-template-columns: repeat(5, 1fr);
             gap: 1.25rem;
             height: calc(100vh - 150px);
         }
@@ -795,6 +795,9 @@
                 {% else %}
                     {% for item in cache['ai_summary']['items'] %}
                     <div class="feed-item">
+                        <div class="item-meta">
+                            <span class="item-time">{{ item.timestamp_display }}</span>
+                        </div>
                         <div class="item-text">{{ item.text }}</div>
                     </div>
                     {% endfor %}

@@ -627,10 +627,15 @@ def fetch_trump() -> None:
             for entry in feed.entries[:MAX_ITEMS_PER_FEED]:
                 # Get content - try multiple fields
                 content = entry.get("summary", "") or entry.get("description", "") or entry.get("title", "")
+                text = extract_text_with_links(content)[:500].strip()
+
+                # Skip empty posts (media-only, retruths with no text)
+                if not text:
+                    continue
 
                 items.append({
                     "author": "realDonaldTrump",
-                    "text": extract_text_with_links(content)[:500],
+                    "text": text,
                     "timestamp": entry.get("published", ""),
                     "timestamp_display": format_timestamp(entry.get("published", "")),
                     "link": entry.get("link", ""),
@@ -664,9 +669,12 @@ def fetch_trump() -> None:
                 items = []
                 for entry in feed.entries[:MAX_ITEMS_PER_FEED]:
                     title = entry.get("title", "")
+                    text = clean_html(title)[:400].strip()
+                    if not text:
+                        continue
                     items.append({
                         "author": "TrumpDailyPosts",
-                        "text": clean_html(title)[:400],
+                        "text": text,
                         "timestamp": entry.get("published", ""),
                         "timestamp_display": format_timestamp(entry.get("published", "")),
                         "link": entry.get("link", ""),
@@ -1056,15 +1064,33 @@ def fetch_ai_summary() -> None:
 
         summary_text = message.content[0].text
 
-        # Parse bullet points into items
+        # Parse bullet points into items, extracting per-event timestamps
+        # Expected format: [Category] HH:MM - description
         bullets = []
+        time_pattern = re.compile(r'^\[([^\]]+)\]\s*(\d{1,2}:\d{2})\s*[-–—]\s*(.+)$')
+        gen_time = datetime.now().strftime("%H:%M")
+
         for line in summary_text.strip().split("\n"):
             line = line.strip()
-            if line and (line.startswith("-") or line.startswith("*") or line.startswith("[")):
-                cleaned = line.lstrip("-* ").strip()
+            if not line:
+                continue
+            # Strip leading bullet markers
+            cleaned = line.lstrip("-*• ").strip()
+            if not cleaned:
+                continue
+
+            match = time_pattern.match(cleaned)
+            if match:
+                category, event_time, description = match.groups()
+                bullets.append({
+                    "text": f"[{category}] {description.strip()}",
+                    "timestamp_display": event_time,
+                })
+            elif cleaned.startswith("["):
+                # Has category tag but no time — use generation time
                 bullets.append({
                     "text": cleaned,
-                    "timestamp_display": datetime.now().strftime("%H:%M"),
+                    "timestamp_display": gen_time,
                 })
 
         if not bullets:
