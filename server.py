@@ -55,7 +55,11 @@ if os.path.exists(_env_path):
                         os.environ[_key] = _val
 
 # Runtime toggle for AI summary (can be flipped via dashboard without restart)
-ai_summary_enabled = True  # Toggled by /api/toggle-ai endpoint
+ai_summary_enabled = False  # Off by default — toggle on via dashboard to avoid wasting API credits
+
+# Inactivity tracking: auto-pause AI summaries if nobody views the dashboard
+_last_dashboard_view = None  # Set when someone loads the dashboard
+AI_INACTIVITY_TIMEOUT = 1800  # 30 minutes — pause AI after this long with no views
 
 from config import (
     HOST, PORT, DEBUG, REFRESH_INTERVAL,
@@ -1246,6 +1250,15 @@ def fetch_ai_summary() -> None:
         cache["ai_summary"]["error"] = "AI summary paused (toggle on dashboard)"
         return
 
+    # Auto-pause if nobody has viewed the dashboard recently
+    if _last_dashboard_view is not None:
+        idle_seconds = (datetime.now() - _last_dashboard_view).total_seconds()
+        if idle_seconds > AI_INACTIVITY_TIMEOUT:
+            ai_summary_enabled = False
+            cache["ai_summary"]["error"] = "AI summary auto-paused (no viewers for 30 min). Toggle on to resume."
+            logger.info(f"AI summary auto-paused: no dashboard views for {idle_seconds / 60:.0f} min")
+            return
+
     if not HAS_ANTHROPIC:
         cache["ai_summary"]["error"] = "anthropic package not installed"
         return
@@ -1356,6 +1369,9 @@ def update_all_feeds() -> None:
 @app.route("/")
 def dashboard():
     """Main dashboard page."""
+    global _last_dashboard_view
+    _last_dashboard_view = datetime.now()
+
     # Compute Shabbos delta for soonest market
     shabbos_delta = None
     shabbos_times = None
@@ -1415,8 +1431,10 @@ def manual_refresh():
 @app.route("/api/toggle-ai", methods=["POST"])
 def toggle_ai():
     """Toggle AI summary on/off at runtime (no restart needed)."""
-    global ai_summary_enabled
+    global ai_summary_enabled, _last_dashboard_view
     ai_summary_enabled = not ai_summary_enabled
+    if ai_summary_enabled:
+        _last_dashboard_view = datetime.now()  # Reset inactivity timer on enable
     status = "enabled" if ai_summary_enabled else "disabled"
     logger.info(f"AI summary toggled: {status}")
     return jsonify({"ai_enabled": ai_summary_enabled, "status": status})
@@ -1527,13 +1545,11 @@ if __name__ == "__main__":
     logger.info("Performing initial feed fetch...")
     update_all_feeds()
 
-    # Generate initial AI summary after feeds are populated
-    if HAS_ANTHROPIC and os.environ.get("ANTHROPIC_API_KEY"):
-        logger.info("Generating initial AI summary...")
-        fetch_ai_summary()
+    # AI summary starts OFF — no initial API call. User toggles on via dashboard.
+    # (Previous behavior: auto-called on startup, wasting credits if nobody was watching)
 
     # AI status for startup message
-    _ai_status = "ready" if (HAS_ANTHROPIC and os.environ.get("ANTHROPIC_API_KEY")) else "no API key" if HAS_ANTHROPIC else "no package"
+    _ai_status = "off (toggle on dashboard)" if (HAS_ANTHROPIC and os.environ.get("ANTHROPIC_API_KEY")) else "no API key" if HAS_ANTHROPIC else "no package"
 
     # Print startup info
     print("\n" + "=" * 50)
