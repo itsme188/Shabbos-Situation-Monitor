@@ -20,7 +20,7 @@
 - `templates/index.html` — dashboard template
 
 ## Known Issues (from first Shabbos run, Feb 27 2026 — grade: B-)
-- **Polymarket:** resolved markets vanish from feed with no fallback. Need graceful handling when a market resolves mid-Shabbos (show resolved state, or swap to next market)
+- ~~**Polymarket:** resolved markets vanish from feed with no fallback~~ — FIXED: Resolved markets now show with YES/NO badge. Display capped to all active + 1 most-recently-resolved. Delta matches by market title, not array position.
 - ~~**Twitter:** hours-long gaps with no updates~~ — FIXED: 4-tier fallback (syndication → BlueSky → Nitter RSS → Nitter HTML), xcancel.com with "mistique" UA, Google News as last resort with source attribution
 - ~~**Times of Israel liveblog:** went silent for hours~~ — FIXED: Israel timezone for date URLs, zero-padded format variant, structural CSS fallback, stale cache clearing
 - ~~**Trump Truth Social:** posts containing links show opaque URLs instead of readable content~~ — FIXED: `extract_text_with_links()` now shows destination URLs inline. Empty media-only/retruth posts are filtered out.

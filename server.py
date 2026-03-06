@@ -982,9 +982,7 @@ def fetch_polymarket() -> None:
 
                 dated_markets = []
                 for market in markets:
-                    # Skip closed/resolved markets
-                    if market.get("closed"):
-                        continue
+                    is_closed = bool(market.get("closed"))
 
                     prices_str = market.get("outcomePrices", "[]")
                     try:
@@ -994,7 +992,8 @@ def fetch_polymarket() -> None:
                     except (json.JSONDecodeError, IndexError, ValueError):
                         probability = 0
 
-                    if probability == 0 or probability == 100:
+                    # Skip 0%/100% only for active markets (resolved markets ARE 0/100)
+                    if not is_closed and (probability == 0 or probability == 100):
                         continue
 
                     title = market.get("groupItemTitle", "")
@@ -1007,28 +1006,44 @@ def fetch_polymarket() -> None:
                     except ValueError:
                         deadline = datetime.max  # Unknown dates sort last
 
-                    dated_markets.append({
+                    entry = {
                         "title": title,
                         "question": question,
                         "probability": probability,
                         "volume": market.get("volumeNum", 0),
                         "link": f"https://polymarket.com/event/{POLYMARKET_EVENT_SLUG}",
                         "_deadline": deadline,
-                    })
+                    }
+                    if is_closed:
+                        entry["resolved"] = True
+                        entry["outcome"] = "YES" if probability >= 50 else "NO"
 
-                # Sort by deadline (soonest first)
-                dated_markets.sort(key=lambda x: x["_deadline"])
+                    dated_markets.append(entry)
 
-                for m in dated_markets:
-                    del m["_deadline"]
+                # Sort: active markets first (by deadline), then resolved (by deadline desc)
+                active = [m for m in dated_markets if not m.get("resolved")]
+                resolved = [m for m in dated_markets if m.get("resolved")]
+                active.sort(key=lambda x: x["_deadline"])
+                resolved.sort(key=lambda x: x["_deadline"], reverse=True)  # most recent first
 
-                all_items.extend(dated_markets)
-                logger.info(f"Got {len(dated_markets)} active markets from {POLYMARKET_EVENT_SLUG}")
+                # Keep all active + at most 1 most-recently-resolved (for context)
+                display_markets = active + resolved[:1]
+
+                for m in display_markets:
+                    m.pop("_deadline", None)
+                # Clean up remaining resolved items too
+                for m in resolved[1:]:
+                    m.pop("_deadline", None)
+
+                all_items.extend(display_markets)
+                n_active = len(active)
+                n_resolved = len(resolved)
+                logger.info(f"Got {n_active} active + {n_resolved} resolved markets from {POLYMARKET_EVENT_SLUG} (showing {len(display_markets)})")
 
                 # --- Shabbos snapshot logic ---
-                if dated_markets:
+                if active:
                     try:
-                        soonest = dated_markets[0]
+                        soonest = active[0]
                         times = get_shabbos_times()
                         now = datetime.now(_tz)
 
@@ -1380,16 +1395,26 @@ def dashboard():
         shabbos_times = get_shabbos_times()
         snapshot = load_shabbos_snapshot()
         if snapshot and cache["polymarket"]["items"]:
-            # Find the soonest non-trending market
+            # Match by market title (not position — markets may resolve/shuffle)
+            matched = None
             for item in cache["polymarket"]["items"]:
-                if not item.get("is_trending"):
-                    shabbos_delta = {
-                        "current": item["probability"],
-                        "at_start": snapshot["probability"],
-                        "delta": item["probability"] - snapshot["probability"],
-                        "market_title": snapshot["market_title"],
-                    }
+                if not item.get("is_trending") and item.get("title") == snapshot.get("market_title"):
+                    matched = item
                     break
+            # Fall back to first non-trending if snapshot market not found
+            if not matched:
+                for item in cache["polymarket"]["items"]:
+                    if not item.get("is_trending"):
+                        matched = item
+                        break
+            if matched:
+                shabbos_delta = {
+                    "current": matched["probability"],
+                    "at_start": snapshot["probability"],
+                    "delta": matched["probability"] - snapshot["probability"],
+                    "market_title": snapshot["market_title"],
+                    "resolved": matched.get("resolved", False),
+                }
     except Exception as e:
         logger.debug(f"Shabbos delta computation failed: {e}")
 
