@@ -12,12 +12,13 @@ DEBUG = False
 # Refresh interval (seconds)
 REFRESH_INTERVAL = 300  # 5 minutes
 
-# Twitter Accounts to Monitor (instead of list - more reliable)
+# OSINT Accounts to Monitor (fetched via Twitter/Nitter/BlueSky fallback chain)
 TWITTER_ACCOUNTS = [
     "Faytuks",
     "no_itsmyturn",
     "manniefabian",
-    "sentdefender",
+    "Osint613",
+    "Intel_Sky",
     "JSchanzer",
     "IntelCrab",
     "Global_Mil_Info",
@@ -61,8 +62,7 @@ XCANCEL_USER_AGENT = "mistique"
 # BlueSky (AT Protocol) — open API, no auth needed for public posts
 # Map Twitter usernames to BlueSky handles for accounts that cross-post
 BLUESKY_HANDLES = {
-    "sentdefender": "sentdefender.bsky.social",
-    # Add more OSINT accounts as they join BlueSky
+    # Add OSINT accounts as they join BlueSky
 }
 BLUESKY_API_BASE = "https://public.api.bsky.app/xrpc"
 
