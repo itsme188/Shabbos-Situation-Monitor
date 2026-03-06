@@ -30,9 +30,10 @@
 - Each feed has: fetcher function, cache entry, error state, last_updated timestamp
 - `update_all_feeds()` runs all fetchers concurrently via ThreadPoolExecutor
 - **OSINT column** (UI label) backed by `twitter_list` cache key — internal names kept for cache compatibility
-- OSINT uses 4-tier fallback: syndication API → BlueSky AT Protocol → Nitter RSS → Nitter HTML scraping
-- BlueSky (`public.api.bsky.app`): open API, no auth. `BLUESKY_HANDLES` in config maps Twitter usernames → BlueSky handles
-- xcancel.com RSS requires `User-Agent: mistique` (set in `XCANCEL_USER_AGENT`). RSS still returns "not whitelisted" as of Mar 2026, but HTML scraping works
+- OSINT uses 5-tier fallback: syndication → TwStalker → BlueSky → Nitter RSS → Nitter HTML → Google News
+- **TwStalker** (`twstalker.com`): primary source, works for 11/13 accounts. Uses `curl` subprocess (not Python `requests`) because TwStalker blocks via TLS fingerprinting. `threading.Semaphore(2)` rate-limits concurrent requests. IsraelRadar_ and YoavLimor use JS-rendered pages (unfetchable without headless browser)
+- BlueSky (`public.api.bsky.app`): open API, no auth. Only Faytuks is active on BlueSky (others dormant). `BLUESKY_HANDLES` in config
+- Nitter: only xcancel.com remains (5 dead instances removed Mar 2026). RSS returns "not whitelisted"; HTML scraping rate-limited
 - When all Twitter methods fail, Google News fallback fires — extracts actual source name from title, marks `source: "google_news"` for dynamic column header
 - Polymarket filters out closed/resolved markets and sorts by soonest deadline
 - Shabbos snapshot captures Polymarket probability at candle lighting for delta display
@@ -57,3 +58,5 @@
 - **Display-only renames**: When renaming a UI concept (e.g., "Twitter" → "OSINT"), keep internal cache keys/function names unchanged to avoid cache file incompatibility and reduce blast radius
 - **Truncation ellipsis**: All text truncation points (300/500 char limits) append `...` when content is cut. Use lambda wrapper for chained expressions: `(lambda t: t[:300] + ("..." if len(t) > 300 else ""))(expr)`
 - **Worktree venv access**: Worktree can't run `bash ./start.sh` via preview_start (permission errors). Use absolute path to main repo's venv python: `/Users/Yitzi/Desktop/shabbos situation monitor/venv/bin/python3`
+- **TLS fingerprinting**: Some sites (twstalker.com) block Python `requests` via JA3 TLS fingerprint but allow `curl`. Use `subprocess.run(["curl", ...])` as workaround. macOS curl uses BoringSSL which passes
+- **Deploying worktree changes**: After merging PRs on GitHub, must `git pull origin main` in the main repo AND kill the server process (`kill $(lsof -i :8080 -t)`) — start.sh auto-restarts with new code
