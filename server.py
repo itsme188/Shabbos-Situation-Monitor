@@ -11,6 +11,7 @@ Or use: ./start.sh
 import json
 import logging
 import os
+import subprocess
 import tempfile
 import threading
 import time
@@ -21,6 +22,9 @@ from typing import Dict, List, Optional
 from html import unescape
 from zoneinfo import ZoneInfo
 import re
+
+# Rate limiter for twstalker — limits concurrent requests to avoid 429s
+_twstalker_semaphore = threading.Semaphore(2)
 
 from astral import LocationInfo
 from astral.sun import sun
@@ -70,6 +74,7 @@ from config import (
     GOOGLE_NEWS_TWITTER_FALLBACK, TWITTER_TOPIC_QUERIES,
     TWITTER_SYNDICATION_TIMEOUT, TWITTER_ACCOUNT_TIMEOUT, XCANCEL_USER_AGENT,
     BLUESKY_HANDLES, BLUESKY_API_BASE,
+    TWSTALKER_BASE, TWSTALKER_TIMEOUT,
     POLYMARKET_EVENT_SLUG, POLYMARKET_API_URL,
     MAX_ITEMS_PER_FEED, REQUEST_TIMEOUT,
     LOCATION_LAT, LOCATION_LON, LOCATION_TZ,
@@ -540,8 +545,95 @@ def _fetch_via_bluesky(username: str) -> List[Dict]:
         return []
 
 
+def _fetch_via_twstalker(username: str) -> List[Dict]:
+    """Method 3: TwStalker HTML scraping (reliable, server-rendered).
+
+    Uses curl subprocess because twstalker blocks Python requests via TLS fingerprinting.
+    """
+    url = f"{TWSTALKER_BASE}/{username}"
+    try:
+        with _twstalker_semaphore:
+            result = subprocess.run(
+                ["curl", "-s", "--connect-timeout", "8", "--max-time", str(TWSTALKER_TIMEOUT),
+                 "-H", "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+                 url],
+                capture_output=True, text=True, timeout=TWSTALKER_TIMEOUT + 5,
+            )
+        html = result.stdout
+        if not html or len(html) < 1000:
+            return []
+        return parse_twstalker_profile(html, username)
+    except Exception as e:
+        logger.debug(f"TwStalker failed for @{username}: {e}")
+        return []
+
+
+def parse_twstalker_profile(html: str, username: str) -> List[Dict]:
+    """Parse TwStalker profile page for tweets."""
+    items = []
+    # Split by activity-group1 blocks (each is a tweet)
+    blocks = re.split(r'<div class="activity-group1">', html)
+
+    for block in blocks[1:]:  # Skip pre-content
+        if len(items) >= 5:
+            break
+        try:
+            # Extract tweet link and ID
+            link_match = re.search(r'href="(/([^/]+)/status/(\d+))"', block)
+            if not link_match:
+                continue
+            original_author = link_match.group(2)
+            link = f"https://twitter.com{link_match.group(1)}"
+
+            # Extract relative timestamp
+            time_match = re.search(
+                r'(\d+ (?:seconds?|minutes?|hours?|days?|weeks?|months?) ago)',
+                block,
+            )
+            timestamp_display = time_match.group(1) if time_match else ""
+
+            # Extract text: strip HTML tags, SVGs, scripts
+            clean = re.sub(r'<script[^>]*>.*?</script>', '', block, flags=re.S)
+            clean = re.sub(r'<style[^>]*>.*?</style>', '', clean, flags=re.S)
+            clean = re.sub(r'<svg[^>]*>.*?</svg>', '', clean, flags=re.S)
+            clean = re.sub(r'<[^>]+>', '\n', clean)
+            clean = unescape(clean)
+
+            # Filter to lines that look like tweet content
+            lines = [l.strip() for l in clean.split('\n') if l.strip()]
+            text_lines = [
+                l for l in lines
+                if len(l) > 20
+                and 'ago' not in l.lower()
+                and not re.match(r'^[\d,\.]+$', l)
+                and not l.startswith('http')
+            ]
+            text = ' '.join(text_lines[:3]).strip()
+            if not text:
+                continue  # Skip media-only tweets
+
+            text = (lambda t: t[:300] + ("..." if len(t) > 300 else ""))(text)
+
+            # Show original author if it's a retweet
+            author = username
+            if original_author.lower() != username.lower():
+                text = f"RT @{original_author}: {text}"
+
+            items.append({
+                "author": author,
+                "text": text,
+                "timestamp": "",  # Relative only, no ISO timestamp available
+                "timestamp_display": timestamp_display,
+                "link": link,
+            })
+        except Exception:
+            continue
+
+    return items
+
+
 def _fetch_via_nitter_html(username: str) -> List[Dict]:
-    """Method 4: Nitter HTML scraping (last resort)."""
+    """Method 5: Nitter HTML scraping (last resort)."""
     for instance in get_healthy_nitter_instances()[:4]:
         try:
             nitter_url = f"https://{instance}/{username}"
@@ -566,6 +658,7 @@ def fetch_single_twitter_account(username: str) -> List[Dict]:
     # Define methods in priority order
     methods = [
         ("syndication", lambda: _fetch_via_syndication(username)),
+        ("twstalker", lambda: _fetch_via_twstalker(username)),
         ("bluesky", lambda: _fetch_via_bluesky(username)),
         ("nitter_rss", lambda: fetch_twitter_via_nitter_rss(username)),
         ("nitter_html", lambda: _fetch_via_nitter_html(username)),

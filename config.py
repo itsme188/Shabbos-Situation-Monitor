@@ -37,13 +37,9 @@ TRUMP_TWITTER_MIRROR = "TrumpDailyPosts"  # Fallback Twitter account
 REUTERS_MIDEAST_RSS = "https://news.google.com/rss/search?q=Iran+OR+Israel+Middle+East&hl=en-US&gl=US&ceid=US:en"
 
 # Nitter instances to try (in order of reliability)
+# Most are dead as of Mar 2026 — xcancel.com is the only one that sometimes works
 NITTER_INSTANCES = [
     "xcancel.com",
-    "nitter.poast.org",
-    "nitter.privacydev.net",
-    "nitter.cz",
-    "nitter.1d4.us",
-    "nitter.kavin.rocks",
 ]
 
 # Twitter fallback: Google News RSS when all Twitter/Nitter methods fail
@@ -59,10 +55,15 @@ TWITTER_ACCOUNT_TIMEOUT = 60      # seconds (global timeout for all methods per 
 # xcancel.com requires this specific User-Agent for RSS feeds
 XCANCEL_USER_AGENT = "mistique"
 
+# TwStalker — Twitter viewer with server-rendered HTML (no JS needed)
+TWSTALKER_BASE = "https://twstalker.com"
+TWSTALKER_TIMEOUT = 10  # seconds — pages are large (~500KB)
+
 # BlueSky (AT Protocol) — open API, no auth needed for public posts
 # Map Twitter usernames to BlueSky handles for accounts that cross-post
 BLUESKY_HANDLES = {
-    # Add OSINT accounts as they join BlueSky
+    "Faytuks": "faytuks.bsky.social",
+    # Other accounts exist on BlueSky but rarely post there
 }
 BLUESKY_API_BASE = "https://public.api.bsky.app/xrpc"
 
