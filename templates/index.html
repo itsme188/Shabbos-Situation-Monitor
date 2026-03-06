@@ -592,7 +592,7 @@
     <header>
         <h1>Shabbos Situation Monitor</h1>
         <div class="status">
-            {% for feed_key, feed_label in [('twitter_list', 'Twitter'), ('trump', 'Trump'), ('reuters', 'News'), ('toi_liveblog', 'TOI'), ('ai_summary', 'AI')] %}
+            {% for feed_key, feed_label in [('twitter_list', 'OSINT'), ('trump', 'Trump'), ('reuters', 'News'), ('toi_liveblog', 'TOI'), ('ai_summary', 'AI')] %}
             {% if cache.get(feed_key) %}
             {% set lu = cache[feed_key]['last_updated'] %}
             {% set age = ((generated_at - lu).total_seconds() / 60)|int if lu else -1 %}
@@ -641,15 +641,15 @@
     {% endif %}
 
     <div class="grid">
-        <!-- Twitter Accounts Column -->
+        <!-- OSINT Column -->
         <div class="feed">
             <div class="feed-header twitter-list">
                 <span>
                     <span class="indicator"></span>
                     {% if cache['twitter_list'].get('source') == 'google_news' %}
-                        OSINT News <span style="font-size: 0.6rem; font-weight: 400; text-transform: none;">(Twitter offline)</span>
+                        OSINT <span style="font-size: 0.6rem; font-weight: 400; text-transform: none;">(via Google News)</span>
                     {% else %}
-                        Twitter
+                        OSINT
                     {% endif %}
                 </span>
                 <span class="feed-count">

@@ -451,7 +451,7 @@ def fetch_twitter_accounts() -> None:
             cache["twitter_list"] = {
                 "items": gnews_items[:MAX_ITEMS_PER_FEED],
                 "last_updated": datetime.now(),
-                "error": "Twitter unavailable — showing OSINT news via Google News",
+                "error": "Feeds unavailable — showing news via Google News",
                 "account_status": account_status,
                 "source": "google_news",
             }
@@ -460,7 +460,7 @@ def fetch_twitter_accounts() -> None:
             cache["twitter_list"]["account_status"] = account_status
             cache["twitter_list"]["source"] = "none"
             if not cache["twitter_list"]["items"]:
-                cache["twitter_list"]["error"] = "Could not fetch any Twitter accounts"
+                cache["twitter_list"]["error"] = "Could not fetch any OSINT feeds"
             logger.warning("All Twitter account fetches failed (including Google News)")
 
 
@@ -482,7 +482,7 @@ def _fetch_twitter_google_news_fallback() -> List[Dict]:
                     source = parts[1] if len(parts) > 1 else "News"
                 all_items.append({
                     "author": source,
-                    "text": title[:300],
+                    "text": title[:300] + ("..." if len(title) > 300 else ""),
                     "timestamp": entry.get("published", ""),
                     "timestamp_display": format_timestamp(entry.get("published", "")),
                     "link": entry.get("link", ""),
@@ -527,7 +527,7 @@ def _fetch_via_bluesky(username: str) -> List[Dict]:
             created_at = record.get("createdAt", "")
             items.append({
                 "author": username,
-                "text": text[:300],
+                "text": text[:300] + ("..." if len(text) > 300 else ""),
                 "timestamp": created_at,
                 "timestamp_display": format_timestamp(created_at),
                 "link": f"https://bsky.app/profile/{bsky_handle}",
@@ -628,7 +628,7 @@ def fetch_twitter_via_nitter_rss(username: str) -> List[Dict]:
                     for entry in feed.entries[:5]:
                         items.append({
                             "author": username,
-                            "text": clean_html(entry.get("title", "") or entry.get("description", ""))[:300],
+                            "text": (lambda t: t[:300] + ("..." if len(t) > 300 else ""))(clean_html(entry.get("title", "") or entry.get("description", ""))),
                             "timestamp": entry.get("published", ""),
                             "timestamp_display": format_timestamp(entry.get("published", "")),
                             "link": entry.get("link", f"https://twitter.com/{username}"),
@@ -658,7 +658,7 @@ def parse_twitter_syndication(html: str, username: str) -> List[Dict]:
             if text_elem:
                 items.append({
                     "author": username,
-                    "text": text_elem.get_text(strip=True)[:300],
+                    "text": (lambda t: t[:300] + ("..." if len(t) > 300 else ""))(text_elem.get_text(strip=True)),
                     "timestamp": time_elem.get("datetime", "") if time_elem else "",
                     "timestamp_display": time_elem.get_text(strip=True) if time_elem else "",
                     "link": f"https://twitter.com/{username}",
@@ -716,7 +716,8 @@ def fetch_trump() -> None:
             for entry in feed.entries[:MAX_ITEMS_PER_FEED]:
                 # Get content - try multiple fields
                 content = entry.get("summary", "") or entry.get("description", "") or entry.get("title", "")
-                text = extract_text_with_links(content)[:500].strip()
+                _raw = extract_text_with_links(content)
+                text = (_raw[:500] + ("..." if len(_raw) > 500 else "")).strip()
 
                 # Skip empty posts (media-only, retruths with no text)
                 if not text:
@@ -1144,7 +1145,7 @@ def _parse_ai_bullets(summary_text: str) -> List[Dict]:
 
     if not bullets:
         bullets = [{
-            "text": summary_text[:500],
+            "text": summary_text[:500] + ("..." if len(summary_text) > 500 else ""),
             "timestamp_display": gen_time,
             "category": "",
         }]
