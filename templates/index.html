@@ -131,6 +131,19 @@
             letter-spacing: 0.05em;
             color: var(--text-muted);
         }
+        .pm-resolved {
+            opacity: 0.6;
+        }
+        .pm-resolved-badge {
+            font-size: 0.6rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+            padding: 0.1rem 0.3rem;
+            border-radius: 3px;
+            background: var(--border);
+            color: var(--text-secondary);
+        }
 
         @media (max-width: 768px) {
             .grid {
@@ -616,12 +629,16 @@
         <span class="pm-label">Markets</span>
         {% for item in cache['polymarket']['items'] %}
             {% if not item.get('is_trending') %}
-            <span class="pm-market">
+            <span class="pm-market {% if item.get('resolved') %}pm-resolved{% endif %}">
                 <strong>{{ item.question|truncate(55, True) }}</strong>
-                <span class="probability {% if item.probability < 20 %}probability-low{% elif item.probability < 50 %}probability-med{% else %}probability-high{% endif %}">
-                    {{ item.probability }}%
-                </span>
-                {% if loop.first and shabbos_delta and not item.get('is_trending') %}
+                {% if item.get('resolved') %}
+                    <span class="pm-resolved-badge">{{ item.outcome }}</span>
+                {% else %}
+                    <span class="probability {% if item.probability < 20 %}probability-low{% elif item.probability < 50 %}probability-med{% else %}probability-high{% endif %}">
+                        {{ item.probability }}%
+                    </span>
+                {% endif %}
+                {% if shabbos_delta and shabbos_delta.market_title == item.get('title') %}
                     {% if shabbos_delta.delta > 0 %}
                         <span class="shabbos-delta delta-up">+{{ shabbos_delta.delta }}</span>
                     {% elif shabbos_delta.delta < 0 %}
