@@ -104,37 +104,42 @@ NITTER_TIMEOUT = 8    # seconds - shorter for Nitter (responds fast or not at al
 TWIKIT_COOKIES_FILE = "twikit_cookies.json"
 
 # AI Summary settings (requires ANTHROPIC_API_KEY environment variable)
-AI_SUMMARY_INTERVAL = 3600     # seconds (1 hour)
-AI_SUMMARY_HOURLY_MODEL = "claude-haiku-4-5-20251001"  # Fast/cheap for hourly summaries
-AI_SUMMARY_OVERVIEW_MODEL = "claude-opus-4-6"           # Best quality for 12-hour overview
 AI_SUMMARY_MAX_TOKENS = 1024
-AI_SUMMARY_OVERVIEW_INTERVAL = 3  # hours between overview regeneration
 
-AI_SUMMARY_HOURLY_PROMPT = """You are a concise news analyst monitoring the Middle East situation.
-Analyze the provided feed data and produce a bullet-point summary of the key developments.
+# Schedule (all hours in ET)
+AI_SUMMARY_MORNING_HOUR = 8                              # 8 AM ET - comprehensive morning summary
+AI_SUMMARY_REGULAR_HOURS = [10, 12, 14, 16, 18, 20, 22, 0]  # 2-hour summaries
+AI_SUMMARY_QUIET_HOURS = range(1, 8)                     # 1 AM - 7 AM: no summaries
+
+# Models
+AI_SUMMARY_MORNING_MODEL = "claude-opus-4-6"             # Best quality for morning summary
+AI_SUMMARY_REGULAR_MODEL = "claude-haiku-4-5-20251001"   # Fast/cheap for 2-hour summaries
+
+AI_SUMMARY_MORNING_PROMPT = """You are a concise news analyst monitoring the Middle East situation.
+Write a comprehensive summary of the key developments from the overnight period (roughly midnight to 8 AM ET).
+Rules:
+- Write 2-4 paragraphs in flowing prose (not bullet points)
+- Cover the most significant developments chronologically
+- Note the overall trajectory: escalation, de-escalation, or stable
+- Highlight any breaking news that occurred while most US readers were asleep
+- Mention 3-5 most important developments
+- All times should be in ET (Eastern Time) using Day H:MM AM/PM format (e.g., Sat 3:15 AM)
+- If nothing significant happened overnight, say so briefly in one paragraph
+"""
+
+AI_SUMMARY_REGULAR_PROMPT = """You are a concise news analyst monitoring the Middle East situation.
+Analyze the provided feed data and produce a bullet-point summary of the key developments from the last 2 hours.
 Rules:
 - Maximum 8 bullet points
 - Each bullet should be one clear sentence
 - Focus on NEW developments, not background
 - If multiple sources report the same event, note that
 - Highlight any escalation/de-escalation signals
-- Start each bullet with a category tag AND event time in ET: [Category] HH:MM - description
-  Example: [Military] 14:30 - IDF confirmed strikes on targets in southern Lebanon
-  Example: [Breaking] 19:45 - Al Jazeera reports Iranian retaliation underway
+- Start each bullet with a category tag AND event time in ET: [Category] Day H:MM AM/PM - description
+  Example: [Military] Fri 2:30 PM - IDF confirmed strikes on targets in southern Lebanon
+  Example: [Breaking] Fri 7:45 PM - Al Jazeera reports Iranian retaliation underway
 - The current time context is provided at the top of the feed data
 - Convert all event times to ET (Eastern Time) for consistency
 - Valid categories: Military, Diplomatic, Political, Breaking, Markets
 - If nothing significant is happening, say so briefly
-"""
-
-AI_SUMMARY_OVERVIEW_PROMPT = """You are a concise news analyst. Given several hours of bullet-point summaries about the Middle East situation, write a single paragraph (3-5 sentences) that captures the big picture.
-
-Rules:
-- Summarize the overall trajectory: is the situation escalating, de-escalating, or stable?
-- Mention the 2-3 most significant developments
-- Note any major shifts or turning points
-- Write in present tense for ongoing situations
-- Keep it under 100 words
-- Do NOT use bullet points — write a flowing paragraph
-- All times should be in ET (Eastern Time)
 """
