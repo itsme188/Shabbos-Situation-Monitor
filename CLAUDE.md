@@ -26,6 +26,16 @@
 - ~~**Trump Truth Social:** posts containing links show opaque URLs instead of readable content~~ — FIXED: `extract_text_with_links()` now shows destination URLs inline. Empty media-only/retruth posts are filtered out.
 - Core value delivered: all key breaking news was surfaced
 
+## Known Issues (from second Shabbos run, Mar 7 2026 — grade: F)
+- **CRITICAL: Zombie start.sh processes**: 8 concurrent start.sh instances were running (some from days earlier). Each crash-loops server.py every ~6s, generating 1000+ feed cycles in 10 min. This hammered all sources into rate-limiting and caused every other failure.
+- **server.py does expensive work before port binding**: `update_all_feeds()` fires 30+ HTTP requests BEFORE `app.run()` tries to bind port 8080. Doomed instances still flood all external sources.
+- **Cache race condition**: Multiple processes writing `feed_cache.json` simultaneously — stale data overwrites fresh data randomly.
+- **TOI permanent 429**: Flood from zombie processes caused Times of Israel to block our IP for entire Shabbos.
+- **OSINT degraded to 3/13 accounts**: TwStalker rate-limited by concurrent curl floods. 5,509 "All methods failed" logged.
+- **Trump raw URLs**: Some Truth Social posts still show opaque `truthsocial.com/...` URLs instead of text content.
+- **AI summary paused/confused**: Multiple competing scheduler instances from zombie processes.
+- **Logs lost**: 35K lines in 10 min from crash-loop caused log rotation, wiping actual Shabbos hours.
+
 ## Feed Architecture
 - Each feed has: fetcher function, cache entry, error state, last_updated timestamp
 - `update_all_feeds()` runs all fetchers concurrently via ThreadPoolExecutor
@@ -59,4 +69,8 @@
 - **Truncation ellipsis**: All text truncation points (300/500 char limits) append `...` when content is cut. Use lambda wrapper for chained expressions: `(lambda t: t[:300] + ("..." if len(t) > 300 else ""))(expr)`
 - **Worktree venv access**: Worktree can't run `bash ./start.sh` via preview_start (permission errors). Use absolute path to main repo's venv python: `/Users/Yitzi/Desktop/shabbos situation monitor/venv/bin/python3`
 - **TLS fingerprinting**: Some sites (twstalker.com) block Python `requests` via JA3 TLS fingerprint but allow `curl`. Use `subprocess.run(["curl", ...])` as workaround. macOS curl uses BoringSSL which passes
-- **Deploying worktree changes**: After merging PRs on GitHub, must `git pull origin main` in the main repo AND kill the server process (`kill $(lsof -i :8080 -t)`) — start.sh auto-restarts with new code
+- **Deploying worktree changes**: After merging PRs on GitHub, must `git pull origin main` in the main repo AND kill ALL server processes (see below) — start.sh auto-restarts with new code
+- **CRITICAL — Kill ALL processes, not just port 8080**: `kill $(lsof -i :8080 -t)` only kills the one server holding the port. Zombie `start.sh` processes survive and keep crash-looping. Use: `pkill -f 'start.sh' ; pkill -f 'server.py'` then start fresh with ONE `./start.sh`
+- **start.sh needs a PID/lock guard**: Currently has no dedup — launching it multiple times (from Terminal, AppleScript, Claude Code) creates parallel crash-loops. Must add port check or lock file before starting server.py
+- **server.py must check port BEFORE doing work**: Move `update_all_feeds()` to AFTER successful port bind, or add early port-availability check. Currently every doomed startup wastes 30+ HTTP requests
+- **Failed fetches should preserve last-good cache**: Currently `fetch_toi()` and others clear items on failure. Should keep stale items with a "stale" flag rather than showing empty columns
