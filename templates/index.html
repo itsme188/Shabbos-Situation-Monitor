@@ -101,50 +101,6 @@
             }
         }
 
-        /* Polymarket compact header bar */
-        .polymarket-bar {
-            display: flex;
-            align-items: center;
-            gap: 0.75rem;
-            padding: 0.5rem 0;
-            margin-bottom: 0.75rem;
-            border-bottom: 1px solid var(--border);
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-            font-size: 0.8rem;
-            color: var(--text-secondary);
-            flex-wrap: wrap;
-        }
-        .polymarket-bar .probability {
-            font-size: 1rem;
-            font-weight: 600;
-            margin-bottom: 0;
-        }
-        .pm-market {
-            display: inline-flex;
-            align-items: center;
-            gap: 0.4rem;
-        }
-        .pm-sep { color: var(--border); }
-        .pm-label {
-            font-size: 0.65rem;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-            color: var(--text-muted);
-        }
-        .pm-resolved {
-            opacity: 0.6;
-        }
-        .pm-resolved-badge {
-            font-size: 0.6rem;
-            font-weight: 600;
-            text-transform: uppercase;
-            letter-spacing: 0.03em;
-            padding: 0.1rem 0.3rem;
-            border-radius: 3px;
-            background: var(--border);
-            color: var(--text-secondary);
-        }
-
         @media (max-width: 768px) {
             .grid {
                 grid-template-columns: 1fr;
@@ -295,84 +251,6 @@
             font-size: 0.6rem;
             text-transform: uppercase;
             margin-left: 0.5rem;
-        }
-
-        /* Polymarket specific */
-        .probability {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-            font-size: 1.75rem;
-            font-weight: 600;
-            margin-bottom: 0.25rem;
-        }
-
-        .probability-low {
-            color: var(--accent-sage);
-        }
-
-        .probability-med {
-            color: var(--accent-clay);
-        }
-
-        .probability-high {
-            color: var(--accent-dusty-rose);
-        }
-
-        .market-title {
-            font-weight: 600;
-            font-size: 0.9rem;
-            margin-bottom: 0.4rem;
-            color: var(--text-primary);
-        }
-
-        .market-question {
-            font-size: 0.8rem;
-            color: var(--text-secondary);
-            margin-bottom: 0.4rem;
-            line-height: 1.4;
-        }
-
-        .trending-separator {
-            border-top: 1px dashed var(--border);
-            margin: 0.5rem 0;
-            padding-top: 0.5rem;
-        }
-
-        .trending-label {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-            font-size: 0.6rem;
-            font-weight: 600;
-            text-transform: uppercase;
-            letter-spacing: 0.08em;
-            color: var(--accent-clay);
-            margin-bottom: 0.3rem;
-        }
-
-        .market-volume {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-            font-size: 0.7rem;
-            color: var(--text-muted);
-        }
-
-        .shabbos-delta {
-            display: inline-block;
-            font-family: 'JetBrains Mono', 'SF Mono', monospace;
-            font-size: 0.7rem;
-            font-weight: 600;
-            padding: 0.1rem 0.4rem;
-            border-radius: 3px;
-            margin-left: 0.4rem;
-        }
-        .shabbos-delta.delta-up {
-            color: var(--accent-dusty-rose);
-            background: rgba(176, 116, 112, 0.12);
-        }
-        .shabbos-delta.delta-down {
-            color: var(--accent-sage);
-            background: rgba(130, 150, 115, 0.12);
-        }
-        .shabbos-delta.delta-flat {
-            color: var(--text-muted);
-            background: rgba(128, 128, 128, 0.08);
         }
 
         .shabbos-info {
@@ -618,44 +496,15 @@
             {% endif %}
             {% endfor %}
             <span class="status-item" style="margin-left: 0.5rem; padding-left: 1rem; border-left: 1px solid var(--border);">
-                {{ generated_at.strftime('%H:%M') }}
+                {{ generated_at.strftime('%a %-I:%M %p') }}
             </span>
-        </div>
-    </header>
-
-    <!-- Polymarket compact header bar -->
-    {% if cache['polymarket']['items'] %}
-    <div class="polymarket-bar">
-        <span class="pm-label">Markets</span>
-        {% for item in cache['polymarket']['items'] %}
-            {% if not item.get('is_trending') %}
-            <span class="pm-market {% if item.get('resolved') %}pm-resolved{% endif %}">
-                <strong>{{ item.question|truncate(55, True) }}</strong>
-                {% if item.get('resolved') %}
-                    <span class="pm-resolved-badge">{{ item.outcome }}</span>
-                {% else %}
-                    <span class="probability {% if item.probability < 20 %}probability-low{% elif item.probability < 50 %}probability-med{% else %}probability-high{% endif %}">
-                        {{ item.probability }}%
-                    </span>
-                {% endif %}
-                {% if shabbos_delta and shabbos_delta.market_title == item.get('title') %}
-                    {% if shabbos_delta.delta > 0 %}
-                        <span class="shabbos-delta delta-up">+{{ shabbos_delta.delta }}</span>
-                    {% elif shabbos_delta.delta < 0 %}
-                        <span class="shabbos-delta delta-down">{{ shabbos_delta.delta }}</span>
-                    {% endif %}
-                {% endif %}
-            </span>
-            {% if not loop.last %}<span class="pm-sep">|</span>{% endif %}
-            {% endif %}
-        {% endfor %}
-        {% if shabbos_times %}
-            <span style="margin-left: auto; color: var(--text-muted); font-size: 0.7rem;">
+            {% if shabbos_times %}
+            <span class="status-item" style="margin-left: 0.25rem; color: var(--text-muted); font-size: 0.7rem;">
                 Candles {{ shabbos_times.candle_lighting_display }}
             </span>
-        {% endif %}
-    </div>
-    {% endif %}
+            {% endif %}
+        </div>
+    </header>
 
     <div class="grid">
         <!-- OSINT Column -->
@@ -818,39 +667,55 @@
                     </div>
                 {% elif not ai_summary_enabled %}
                     <div class="no-items">AI summary paused — flip the toggle to resume</div>
-                {% elif not cache.get('ai_summary') or (cache['ai_summary']['error'] and not cache['ai_summary'].get('hourly_summaries') and not cache['ai_summary']['items']) %}
+                {% elif not cache.get('ai_summary') or (cache['ai_summary']['error'] and not cache['ai_summary'].get('summaries') and not cache['ai_summary']['items']) %}
                     <div class="no-items">{{ cache.get('ai_summary', {}).get('error', 'Summary not yet generated') }}</div>
                 {% else %}
-                    {# === Overview: "Last 12 Hours" pinned section === #}
-                    {% if cache['ai_summary'].get('overview') %}
+                    {# === Morning Summary pinned section === #}
+                    {% if cache['ai_summary'].get('morning_summary') %}
                     <div class="feed-item ai-overview">
                         <div class="item-meta">
-                            <span class="item-author" style="font-weight: 600; letter-spacing: 0.05em;">LAST 12 HOURS</span>
-                            <span class="item-time">{{ cache['ai_summary']['overview']['generated_at_display'] }}</span>
+                            <span class="item-author" style="font-weight: 600; letter-spacing: 0.05em;">MORNING SUMMARY</span>
+                            <span class="item-time">{{ cache['ai_summary']['morning_summary']['generated_at_display'] }}</span>
                         </div>
                         <div class="item-text" style="font-style: italic; line-height: 1.5; opacity: 0.85;">
-                            {{ cache['ai_summary']['overview']['text'] }}
+                            {{ cache['ai_summary']['morning_summary']['text'] }}
                         </div>
                     </div>
                     {% endif %}
 
-                    {# === Hourly summaries (newest first) === #}
-                    {% if cache['ai_summary'].get('hourly_summaries') %}
-                        {% for hour_block in cache['ai_summary']['hourly_summaries'] %}
-                        <div class="feed-item ai-hour-block">
-                            <div class="item-meta">
-                                <span class="item-author" style="font-size: 0.65rem; letter-spacing: 0.03em;">{{ hour_block.hour_label }}</span>
+                    {# === Summary blocks (newest first) === #}
+                    {% if cache['ai_summary'].get('summaries') %}
+                        {% for entry in cache['ai_summary']['summaries'] %}
+                        {% if entry.get('type') == 'morning' and entry == cache['ai_summary'].get('morning_summary') %}
+                            {# Skip — already rendered as pinned section above #}
+                        {% elif entry.get('type') == 'morning' %}
+                            {# Older morning summaries in history — show truncated #}
+                            <div class="feed-item ai-hour-block">
+                                <div class="item-meta">
+                                    <span class="item-author" style="font-size: 0.65rem; letter-spacing: 0.03em;">{{ entry.hour_label }}</span>
+                                    <span class="item-time">{{ entry.generated_at_display }}</span>
+                                </div>
+                                <div class="item-text" style="font-size: 0.8rem; line-height: 1.4; opacity: 0.85;">
+                                    {{ entry.text[:200] }}{% if entry.text|length > 200 %}...{% endif %}
+                                </div>
                             </div>
-                            {% for bullet in hour_block.bullets %}
-                            <div style="margin-bottom: 0.25rem; font-size: 0.8rem; line-height: 1.4;">
-                                <span class="item-time" style="margin-right: 0.25rem;">{{ bullet.timestamp_display }}</span>
-                                {{ bullet.text }}
+                        {% else %}
+                            {# Regular 2-hour summaries — bullet format #}
+                            <div class="feed-item ai-hour-block">
+                                <div class="item-meta">
+                                    <span class="item-author" style="font-size: 0.65rem; letter-spacing: 0.03em;">{{ entry.hour_label }}</span>
+                                </div>
+                                {% for bullet in entry.bullets %}
+                                <div style="margin-bottom: 0.25rem; font-size: 0.8rem; line-height: 1.4;">
+                                    <span class="item-time" style="margin-right: 0.25rem;">{{ bullet.timestamp_display }}</span>
+                                    {{ bullet.text }}
+                                </div>
+                                {% endfor %}
                             </div>
-                            {% endfor %}
-                        </div>
+                        {% endif %}
                         {% endfor %}
                     {% elif cache['ai_summary']['items'] %}
-                        {# Backward compat: old format without hourly blocks #}
+                        {# Backward compat: old format without summary blocks #}
                         {% for item in cache['ai_summary']['items'] %}
                         <div class="feed-item">
                             <div class="item-meta">

@@ -80,9 +80,10 @@ from config import (
     LOCATION_LAT, LOCATION_LON, LOCATION_TZ,
     CANDLE_LIGHTING_OFFSET, HAVDALAH_OFFSET, SHABBOS_SNAPSHOT_FILE,
     CACHE_FILE, CACHE_MAX_AGE,
-    AI_SUMMARY_INTERVAL, AI_SUMMARY_HOURLY_MODEL, AI_SUMMARY_OVERVIEW_MODEL,
-    AI_SUMMARY_MAX_TOKENS, AI_SUMMARY_OVERVIEW_INTERVAL,
-    AI_SUMMARY_HOURLY_PROMPT, AI_SUMMARY_OVERVIEW_PROMPT,
+    AI_SUMMARY_MAX_TOKENS,
+    AI_SUMMARY_MORNING_HOUR, AI_SUMMARY_REGULAR_HOURS, AI_SUMMARY_QUIET_HOURS,
+    AI_SUMMARY_MORNING_MODEL, AI_SUMMARY_REGULAR_MODEL,
+    AI_SUMMARY_MORNING_PROMPT, AI_SUMMARY_REGULAR_PROMPT,
 )
 
 # Setup logging with rotation
@@ -119,9 +120,8 @@ cache: Dict = {
         "items": [],
         "last_updated": None,
         "error": None,
-        "hourly_summaries": [],   # Accumulated hourly summary blocks
-        "overview": None,         # "Last 12 Hours" overview paragraph
-        "overview_updated": None, # When overview was last generated
+        "summaries": [],          # Accumulated summary blocks (morning + 2-hour)
+        "morning_summary": None,  # Latest morning summary (multi-paragraph, displayed specially)
     },
 }
 
@@ -144,12 +144,8 @@ def save_cache_to_disk() -> None:
             }
             # AI summary has extra fields to persist
             if feed_name == "ai_summary":
-                entry["hourly_summaries"] = feed_data.get("hourly_summaries", [])
-                entry["overview"] = feed_data.get("overview")
-                ou = feed_data.get("overview_updated")
-                entry["overview_updated"] = (
-                    ou.isoformat() if isinstance(ou, datetime) else ou
-                )
+                entry["summaries"] = feed_data.get("summaries", [])
+                entry["morning_summary"] = feed_data.get("morning_summary")
             serializable[feed_name] = entry
         # Atomic write: write to temp file in same directory, then rename
         dir_name = os.path.dirname(os.path.abspath(CACHE_FILE))
@@ -196,12 +192,8 @@ def load_cache_from_disk() -> bool:
                     cache[feed_name]["last_updated"] = datetime.fromisoformat(feed_data["last_updated"])
                 # Restore AI summary history
                 if feed_name == "ai_summary":
-                    cache[feed_name]["hourly_summaries"] = feed_data.get("hourly_summaries", [])
-                    cache[feed_name]["overview"] = feed_data.get("overview")
-                    ou = feed_data.get("overview_updated")
-                    cache[feed_name]["overview_updated"] = (
-                        datetime.fromisoformat(ou) if ou else None
-                    )
+                    cache[feed_name]["summaries"] = feed_data.get("summaries", [])
+                    cache[feed_name]["morning_summary"] = feed_data.get("morning_summary")
                 loaded_count += 1
         logger.info(f"Loaded {loaded_count} feeds from disk cache ({age/60:.1f}m old)")
         return loaded_count > 0
@@ -360,13 +352,13 @@ def format_timestamp(timestamp_str: str) -> str:
     try:
         # Try parsing ISO format
         dt = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
-        return dt.strftime('%H:%M')
+        return dt.strftime('%a %-I:%M %p')
     except:
         try:
             # Try RSS format
             from email.utils import parsedate_to_datetime
             dt = parsedate_to_datetime(timestamp_str)
-            return dt.strftime('%H:%M')
+            return dt.strftime('%a %-I:%M %p')
         except:
             return timestamp_str[:16] if timestamp_str else ""
 
@@ -1308,8 +1300,8 @@ def fetch_polymarket() -> None:
 def _parse_ai_bullets(summary_text: str) -> List[Dict]:
     """Parse AI-generated summary text into structured bullet points."""
     bullets = []
-    time_pattern = re.compile(r'^\[([^\]]+)\]\s*(\d{1,2}:\d{2})\s*[-\u2013\u2014]\s*(.+)$')
-    gen_time = datetime.now(ZoneInfo("America/New_York")).strftime("%H:%M")
+    time_pattern = re.compile(r'^\[([^\]]+)\]\s*(?:[A-Z][a-z]{2}\s+)?(\d{1,2}:\d{2}(?:\s*[AaPp][Mm])?)\s*[-\u2013\u2014]\s*(.+)$')
+    gen_time = datetime.now(ZoneInfo("America/New_York")).strftime("%a %-I:%M %p")
 
     for line in summary_text.strip().split("\n"):
         line = line.strip()
@@ -1342,59 +1334,17 @@ def _parse_ai_bullets(summary_text: str) -> List[Dict]:
         }]
 
     # Sort bullets chronologically by timestamp_display
-    bullets.sort(key=lambda b: b.get("timestamp_display", "99:99"))
+    def _sort_key_for_time(display_str):
+        """Convert display timestamp to sortable 24hr string."""
+        try:
+            clean = re.sub(r'^[A-Z][a-z]{2}\s+', '', display_str)
+            dt_parsed = datetime.strptime(clean.strip(), "%I:%M %p")
+            return dt_parsed.strftime("%H:%M")
+        except ValueError:
+            return display_str  # Old 24hr format still sorts ok
+
+    bullets.sort(key=lambda b: _sort_key_for_time(b.get("timestamp_display", "99:99")))
     return bullets
-
-
-def _get_overview_age_hours() -> Optional[float]:
-    """Return hours since last overview was generated, or None if never."""
-    overview_updated = cache["ai_summary"].get("overview_updated")
-    if overview_updated is None:
-        return None
-    if isinstance(overview_updated, str):
-        overview_updated = datetime.fromisoformat(overview_updated)
-    return (datetime.now() - overview_updated).total_seconds() / 3600
-
-
-def _generate_overview(client) -> None:
-    """Generate the 'Last 12 Hours' overview paragraph from accumulated hourly summaries."""
-    summaries = cache["ai_summary"].get("hourly_summaries", [])
-    if len(summaries) < 2:
-        return  # Not enough data for a meaningful overview
-
-    # Build digest from last 12 hours of hourly summaries
-    overview_parts = []
-    for entry in summaries[:12]:
-        overview_parts.append(f"\n--- {entry['hour_label']} ---")
-        for bullet in entry.get("bullets", []):
-            overview_parts.append(f"  {bullet['timestamp_display']} {bullet['text']}")
-
-    overview_input = "\n".join(overview_parts)
-
-    try:
-        message = client.messages.create(
-            model=AI_SUMMARY_OVERVIEW_MODEL,
-            max_tokens=512,
-            system=AI_SUMMARY_OVERVIEW_PROMPT,
-            messages=[{
-                "role": "user",
-                "content": f"Here are the hourly summaries from the last several hours:\n\n{overview_input}",
-            }],
-        )
-
-        now = datetime.now()
-        now_et = datetime.now(ZoneInfo("America/New_York"))
-
-        cache["ai_summary"]["overview"] = {
-            "text": message.content[0].text.strip(),
-            "generated_at": now.isoformat(),
-            "generated_at_display": now_et.strftime("%-I:%M %p ET"),
-        }
-        cache["ai_summary"]["overview_updated"] = now
-        logger.info("AI overview (Last 12 Hours) regenerated")
-
-    except Exception as e:
-        logger.warning(f"AI overview generation failed: {e}")
 
 
 def _build_feed_digest() -> str:
@@ -1403,7 +1353,7 @@ def _build_feed_digest() -> str:
     now_israel = datetime.now(ZoneInfo("Asia/Jerusalem"))
 
     feed_text_parts = [
-        f"Current time: {now_et.strftime('%-I:%M %p')} ET (New York) / "
+        f"Current time: {now_et.strftime('%a %-I:%M %p')} ET (New York) / "
         f"{now_israel.strftime('%H:%M')} Israel time"
     ]
 
@@ -1434,8 +1384,121 @@ def _build_feed_digest() -> str:
     return "\n".join(feed_text_parts) if len(feed_text_parts) > 1 else ""
 
 
-def fetch_ai_summary() -> None:
-    """Generate hourly AI summary and accumulate in history."""
+def _generate_morning_summary(api_key: str) -> None:
+    """Generate comprehensive morning summary covering overnight data (Opus)."""
+    logger.info("Generating morning AI summary (Opus)...")
+
+    feed_digest = _build_feed_digest()
+    if not feed_digest:
+        cache["ai_summary"]["error"] = "No feed data available to summarize"
+        return
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        message = client.messages.create(
+            model=AI_SUMMARY_MORNING_MODEL,
+            max_tokens=AI_SUMMARY_MAX_TOKENS,
+            system=AI_SUMMARY_MORNING_PROMPT,
+            messages=[{
+                "role": "user",
+                "content": f"Here is the current feed data. Summarize overnight developments:\n\n{feed_digest}",
+            }],
+        )
+
+        summary_text = message.content[0].text.strip()
+        gen_time = datetime.now()
+        gen_et = datetime.now(ZoneInfo("America/New_York"))
+
+        morning_entry = {
+            "type": "morning",
+            "text": summary_text,
+            "generated_at": gen_time.isoformat(),
+            "generated_at_display": gen_et.strftime("%a %-I:%M %p ET"),
+            "hour_label": "Morning Summary",
+            "bullets": [],
+        }
+
+        # Store as morning summary (displayed specially in template)
+        cache["ai_summary"]["morning_summary"] = morning_entry
+
+        # Also prepend to summaries list for history
+        summaries = cache["ai_summary"].get("summaries", [])
+        summaries.insert(0, morning_entry)
+        cache["ai_summary"]["summaries"] = summaries[:24]
+
+        cache["ai_summary"]["items"] = []
+        cache["ai_summary"]["last_updated"] = gen_time
+        cache["ai_summary"]["error"] = None
+
+        logger.info("Morning AI summary generated (Opus)")
+
+    except Exception as e:
+        logger.warning(f"Morning AI summary error: {e}")
+        if not cache["ai_summary"].get("summaries") and not cache["ai_summary"]["items"]:
+            cache["ai_summary"]["error"] = f"Summary unavailable: {str(e)[:80]}"
+
+
+def _generate_regular_summary(api_key: str) -> None:
+    """Generate 2-hour summary using Haiku."""
+    logger.info("Generating 2-hour AI summary (Haiku)...")
+
+    feed_digest = _build_feed_digest()
+    if not feed_digest:
+        cache["ai_summary"]["error"] = "No feed data available to summarize"
+        return
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        message = client.messages.create(
+            model=AI_SUMMARY_REGULAR_MODEL,
+            max_tokens=AI_SUMMARY_MAX_TOKENS,
+            system=AI_SUMMARY_REGULAR_PROMPT,
+            messages=[{
+                "role": "user",
+                "content": f"Here are the current feed items. Summarize the key developments:\n\n{feed_digest}",
+            }],
+        )
+
+        summary_text = message.content[0].text
+        bullets = _parse_ai_bullets(summary_text)
+
+        gen_time = datetime.now()
+        gen_et = datetime.now(ZoneInfo("America/New_York"))
+        hour_end = gen_et.replace(minute=0, second=0, microsecond=0)
+        hour_start = hour_end - timedelta(hours=2)
+
+        summary_entry = {
+            "type": "regular",
+            "generated_at": gen_time.isoformat(),
+            "generated_at_display": gen_et.strftime("%a %-I:%M %p ET"),
+            "hour_label": f"{hour_start.strftime('%-I:%M')}-{hour_end.strftime('%-I:%M %p')} ET",
+            "bullets": bullets,
+        }
+
+        summaries = cache["ai_summary"].get("summaries", [])
+        summaries.insert(0, summary_entry)
+        cache["ai_summary"]["summaries"] = summaries[:24]
+
+        cache["ai_summary"]["items"] = bullets
+        cache["ai_summary"]["last_updated"] = gen_time
+        cache["ai_summary"]["error"] = None
+
+        logger.info(f"2-hour AI summary: {len(bullets)} bullets, {len(summaries)} total in history")
+
+    except Exception as e:
+        logger.warning(f"AI summary error: {e}")
+        if not cache["ai_summary"].get("summaries") and not cache["ai_summary"]["items"]:
+            cache["ai_summary"]["error"] = f"Summary unavailable: {str(e)[:80]}"
+
+
+def fetch_ai_summary(force: bool = False) -> None:
+    """Generate AI summary based on time-of-day schedule.
+
+    Schedule (all times ET):
+    - 1 AM - 7 AM: quiet hours, no summaries generated
+    - 8 AM: morning summary (Opus, multi-paragraph, covers overnight)
+    - 10 AM, 12 PM, 2 PM, 4 PM, 6 PM, 8 PM, 10 PM, 12 AM: 2-hour summaries (Haiku)
+    """
     global ai_summary_enabled
 
     if not ai_summary_enabled:
@@ -1461,62 +1524,22 @@ def fetch_ai_summary() -> None:
         logger.warning("AI summary skipped: ANTHROPIC_API_KEY not set")
         return
 
-    logger.info("Generating hourly AI summary...")
+    # Determine current hour in ET
+    now_et = datetime.now(ZoneInfo("America/New_York"))
+    current_hour = now_et.hour
 
-    feed_digest = _build_feed_digest()
-    if not feed_digest:
-        cache["ai_summary"]["error"] = "No feed data available to summarize"
+    # Quiet hours: 1 AM - 7 AM — do nothing (unless forced)
+    if not force and current_hour in AI_SUMMARY_QUIET_HOURS:
+        logger.info(f"AI summary: quiet hours ({current_hour}:00 ET), skipping")
         return
 
-    try:
-        client = anthropic.Anthropic(api_key=api_key)
-        message = client.messages.create(
-            model=AI_SUMMARY_HOURLY_MODEL,
-            max_tokens=AI_SUMMARY_MAX_TOKENS,
-            system=AI_SUMMARY_HOURLY_PROMPT,
-            messages=[{
-                "role": "user",
-                "content": f"Here are the current feed items. Summarize the key developments:\n\n{feed_digest}",
-            }],
-        )
-
-        summary_text = message.content[0].text
-        bullets = _parse_ai_bullets(summary_text)
-
-        # Build hourly summary object
-        gen_time = datetime.now()
-        gen_et = datetime.now(ZoneInfo("America/New_York"))
-        hour_start = gen_et.replace(minute=0, second=0, microsecond=0)
-        hour_end = hour_start + timedelta(hours=1)
-
-        hourly_entry = {
-            "generated_at": gen_time.isoformat(),
-            "generated_at_display": gen_et.strftime("%-I:%M %p ET"),
-            "hour_label": f"{hour_start.strftime('%-I:%M')}-{hour_end.strftime('%-I:%M %p')} ET",
-            "bullets": bullets,
-        }
-
-        # Accumulate: prepend new entry, cap at 24 entries
-        summaries = cache["ai_summary"].get("hourly_summaries", [])
-        summaries.insert(0, hourly_entry)
-        summaries = summaries[:24]
-
-        cache["ai_summary"]["hourly_summaries"] = summaries
-        cache["ai_summary"]["items"] = bullets  # Backward compat
-        cache["ai_summary"]["last_updated"] = gen_time
-        cache["ai_summary"]["error"] = None
-
-        logger.info(f"Hourly AI summary: {len(bullets)} bullets, {len(summaries)} total hours in history")
-
-        # Check if overview needs regeneration
-        overview_age = _get_overview_age_hours()
-        if overview_age is None or overview_age >= AI_SUMMARY_OVERVIEW_INTERVAL:
-            _generate_overview(client)
-
-    except Exception as e:
-        logger.warning(f"AI summary error: {e}")
-        if not cache["ai_summary"].get("hourly_summaries") and not cache["ai_summary"]["items"]:
-            cache["ai_summary"]["error"] = f"Summary unavailable: {str(e)[:80]}"
+    # Determine summary type
+    if current_hour == AI_SUMMARY_MORNING_HOUR:
+        _generate_morning_summary(api_key)
+    elif force or current_hour in AI_SUMMARY_REGULAR_HOURS:
+        _generate_regular_summary(api_key)
+    else:
+        logger.debug(f"AI summary: hour {current_hour} not on schedule, skipping")
 
 
 # ============ MAIN UPDATE FUNCTION ============
@@ -1658,10 +1681,10 @@ def ai_status():
 
 @app.route("/api/refresh-ai", methods=["POST"])
 def refresh_ai():
-    """Manually trigger an AI summary refresh."""
+    """Manually trigger an AI summary refresh (bypasses schedule)."""
     if not ai_summary_enabled:
         return jsonify({"error": "AI summary is disabled"}), 400
-    fetch_ai_summary()
+    fetch_ai_summary(force=True)
     return jsonify({
         "status": "refreshed",
         "item_count": len(cache["ai_summary"]["items"]),
@@ -1748,11 +1771,12 @@ if __name__ == "__main__":
     if HAS_ANTHROPIC:
         scheduler.add_job(
             fetch_ai_summary,
-            "interval",
-            seconds=AI_SUMMARY_INTERVAL,
-            id="ai_summary_updater"
+            "cron",
+            minute=5,
+            id="ai_summary_updater",
+            timezone="America/New_York",
         )
-        logger.info(f"AI summary scheduler registered (every {AI_SUMMARY_INTERVAL // 60} min)")
+        logger.info("AI summary scheduler registered (hourly at :05, schedule-aware)")
         if os.environ.get("ANTHROPIC_API_KEY"):
             logger.info("AI summary ready: API key found")
         else:
