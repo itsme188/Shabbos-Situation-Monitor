@@ -96,7 +96,7 @@ _console_handler.setFormatter(_log_fmt)
 logger.addHandler(_console_handler)
 
 _file_handler = RotatingFileHandler(
-    'server.log', maxBytes=5 * 1024 * 1024, backupCount=3
+    'server.log', maxBytes=50 * 1024 * 1024, backupCount=5
 )
 _file_handler.setFormatter(_log_fmt)
 logger.addHandler(_file_handler)
@@ -329,6 +329,11 @@ def record_nitter_failure(instance: str):
     nitter_health[instance]["last_failure"] = datetime.now()
 
 
+# Exponential backoff state for xcancel rate limiting (429s)
+_xcancel_backoff_until: Optional[datetime] = None
+_xcancel_backoff_minutes: int = 5  # Starting backoff; doubles on consecutive 429s, caps at 30
+
+
 # Nitter error patterns - these appear as RSS entry content when the instance
 # is broken but still returns valid RSS XML with an error message as the entry
 NITTER_ERROR_PATTERNS = [
@@ -392,6 +397,10 @@ def extract_text_with_links(html_text: str) -> str:
         else:
             a_tag.replace_with(link_text or href or "")
     text = soup.get_text(separator=" ", strip=True)
+    # Strip bare truthsocial.com URLs — they're opaque post links that add no
+    # readable content.  The entry's link field already has the canonical URL.
+    text = re.sub(r'\[?https?://(?:www\.)?truthsocial\.com/\S+\]?', '', text)
+    text = re.sub(r'\s+', ' ', text).strip()
     return unescape(text)
 
 
@@ -652,6 +661,9 @@ def parse_twstalker_profile(html: str, username: str) -> List[Dict]:
 def _fetch_via_nitter_html(username: str) -> List[Dict]:
     """Method 5: Nitter HTML scraping (last resort)."""
     for instance in get_healthy_nitter_instances()[:4]:
+        # Respect xcancel backoff from RSS 429s
+        if "xcancel" in instance and _xcancel_backoff_until and datetime.now() < _xcancel_backoff_until:
+            continue
         try:
             nitter_url = f"https://{instance}/{username}"
             response = safe_request(nitter_url, timeout=NITTER_TIMEOUT)
@@ -703,18 +715,37 @@ def fetch_single_twitter_account(username: str) -> List[Dict]:
 
 def fetch_twitter_via_nitter_rss(username: str) -> List[Dict]:
     """Try fetching tweets via Nitter RSS feeds (more reliable than HTML scraping)."""
+    global _xcancel_backoff_until, _xcancel_backoff_minutes
+
     for instance in get_healthy_nitter_instances()[:3]:
         try:
             rss_url = f"https://{instance}/{username}/rss"
             # xcancel.com requires "mistique" User-Agent for RSS access
             if "xcancel" in instance:
+                # Skip if in backoff period from a previous 429
+                if _xcancel_backoff_until and datetime.now() < _xcancel_backoff_until:
+                    logger.debug(f"xcancel: skipping @{username}, backoff active")
+                    continue
                 try:
                     response = requests.get(
                         rss_url,
                         timeout=NITTER_TIMEOUT,
                         headers={"User-Agent": XCANCEL_USER_AGENT},
                     )
+                    if response.status_code == 429:
+                        _xcancel_backoff_until = datetime.now() + timedelta(minutes=_xcancel_backoff_minutes)
+                        logger.warning(f"xcancel rate-limited (429), backing off for {_xcancel_backoff_minutes}m")
+                        _xcancel_backoff_minutes = min(_xcancel_backoff_minutes * 2, 30)
+                        record_nitter_failure(instance)
+                        continue
                     response.raise_for_status()
+                    # Reset backoff on success
+                    _xcancel_backoff_until = None
+                    _xcancel_backoff_minutes = 5
+                except requests.exceptions.HTTPError:
+                    logger.debug(f"xcancel RSS failed for @{username}: HTTP error")
+                    record_nitter_failure(instance)
+                    continue
                 except Exception as e:
                     logger.debug(f"xcancel RSS failed for @{username}: {e}")
                     record_nitter_failure(instance)
@@ -1742,7 +1773,7 @@ if __name__ == "__main__":
     print("=" * 50)
     print(f"\n  Dashboard: http://localhost:{PORT}")
     print(f"  Refresh interval: {REFRESH_INTERVAL // 60} minutes")
-    print(f"  AI summary: {_ai_status} (toggle on dashboard)")
+    print(f"  AI summary: {_ai_status}")
     print(f"  Auto-restart: via start.sh")
     print(f"  Watchdog: active")
     print(f"\n  Press Ctrl+C to stop\n")

@@ -10,7 +10,7 @@ PORT = 8080
 DEBUG = False
 
 # Refresh interval (seconds)
-REFRESH_INTERVAL = 300  # 5 minutes
+REFRESH_INTERVAL = 600  # 10 minutes
 
 # OSINT Accounts to Monitor (fetched via Twitter/Nitter/BlueSky fallback chain)
 TWITTER_ACCOUNTS = [
