@@ -10,7 +10,7 @@
 - Flask on Python 3, port 8080, binds 0.0.0.0
 - APScheduler refreshes feeds every 5 min; watchdog thread recovers silent failures
 - `feed_cache.json` persists across restarts (max 2hr age, atomic writes)
-- `start.sh` has auto-restart loop, venv management, graceful SIGINT handling
+- `start.sh` has auto-restart loop, venv management, graceful SIGINT handling, **port-check guard** against duplicate instances
 
 ## Key Files
 - `server.py` — main app (~1020 lines), routes, scheduler, all feed fetchers
@@ -27,14 +27,15 @@
 - Core value delivered: all key breaking news was surfaced
 
 ## Known Issues (from second Shabbos run, Mar 7 2026 — grade: F)
-- **CRITICAL: Zombie start.sh processes**: 8 concurrent start.sh instances were running (some from days earlier). Each crash-loops server.py every ~6s, generating 1000+ feed cycles in 10 min. This hammered all sources into rate-limiting and caused every other failure.
-- **server.py does expensive work before port binding**: `update_all_feeds()` fires 30+ HTTP requests BEFORE `app.run()` tries to bind port 8080. Doomed instances still flood all external sources.
-- **Cache race condition**: Multiple processes writing `feed_cache.json` simultaneously — stale data overwrites fresh data randomly.
-- **TOI permanent 429**: Flood from zombie processes caused Times of Israel to block our IP for entire Shabbos.
-- **OSINT degraded to 3/13 accounts**: TwStalker rate-limited by concurrent curl floods. 5,509 "All methods failed" logged.
+- ~~**CRITICAL: Zombie start.sh processes**~~ — FIXED: `start.sh` now checks if port 8080 is in use before starting (refuses with PID + kill command). Crash-loop also re-checks port before each restart.
+- ~~**server.py does expensive work before port binding**~~ — FIXED: Socket bind test in `__main__` runs before scheduler/watchdog/update_all_feeds(). Doomed instances exit immediately via `sys.exit(1)`.
+- ~~**Cache race condition**~~ — RESOLVED by zombie fix: only one process can run, so no concurrent writers.
+- ~~**TOI permanent 429**~~ — FIXED: Exponential backoff (5→10→20→30min cap) on 429 responses. `RateLimitError` in `safe_request(raise_on_429=True)` lets TOI fetcher skip cycles when rate-limited. Backoff resets on successful fetch.
+- ~~**OSINT degraded to 3/13 accounts**~~ — RESOLVED by zombie fix: single instance stays within TwStalker's Semaphore(2) rate limit.
 - **Trump raw URLs**: Some Truth Social posts still show opaque `truthsocial.com/...` URLs instead of text content.
-- **AI summary paused/confused**: Multiple competing scheduler instances from zombie processes.
-- **Logs lost**: 35K lines in 10 min from crash-loop caused log rotation, wiping actual Shabbos hours.
+- ~~**AI summary paused/confused**~~ — RESOLVED by zombie fix: only one scheduler instance runs.
+- ~~**Logs lost**~~ — RESOLVED by zombie fix: no more crash-loop flood generating 35K lines in 10min.
+- ~~**TOI clears cache on failure**~~ — FIXED: `fetch_toi()` now preserves last-good items with "Showing cached content (fetch failed)" error instead of clearing to empty.
 
 ## Feed Architecture
 - Each feed has: fetcher function, cache entry, error state, last_updated timestamp
@@ -70,7 +71,8 @@
 - **Worktree venv access**: Worktree can't run `bash ./start.sh` via preview_start (permission errors). Use absolute path to main repo's venv python: `/Users/Yitzi/Desktop/shabbos situation monitor/venv/bin/python3`
 - **TLS fingerprinting**: Some sites (twstalker.com) block Python `requests` via JA3 TLS fingerprint but allow `curl`. Use `subprocess.run(["curl", ...])` as workaround. macOS curl uses BoringSSL which passes
 - **Deploying worktree changes**: After merging PRs on GitHub, must `git pull origin main` in the main repo AND kill ALL server processes (see below) — start.sh auto-restarts with new code
-- **CRITICAL — Kill ALL processes, not just port 8080**: `kill $(lsof -i :8080 -t)` only kills the one server holding the port. Zombie `start.sh` processes survive and keep crash-looping. Use: `pkill -f 'start.sh' ; pkill -f 'server.py'` then start fresh with ONE `./start.sh`
-- **start.sh needs a PID/lock guard**: Currently has no dedup — launching it multiple times (from Terminal, AppleScript, Claude Code) creates parallel crash-loops. Must add port check or lock file before starting server.py
-- **server.py must check port BEFORE doing work**: Move `update_all_feeds()` to AFTER successful port bind, or add early port-availability check. Currently every doomed startup wastes 30+ HTTP requests
-- **Failed fetches should preserve last-good cache**: Currently `fetch_toi()` and others clear items on failure. Should keep stale items with a "stale" flag rather than showing empty columns
+- **Kill ALL processes, not just port 8080**: `kill $(lsof -i :8080 -t)` only kills the one server holding the port. Zombie `start.sh` processes survive and keep crash-looping. Use: `pkill -f 'start.sh' ; pkill -f 'server.py'` then start fresh with ONE `./start.sh`
+- ~~**start.sh needs a PID/lock guard**~~ — DONE: Port check at startup + inside crash-loop
+- ~~**server.py must check port BEFORE doing work**~~ — DONE: Socket bind test in `__main__` before any fetching
+- ~~**Failed fetches should preserve last-good cache**~~ — DONE for TOI: preserves old items on failure
+- **Rate-limit backoff pattern**: `RateLimitError` exception + `safe_request(raise_on_429=True)` + per-source `_backoff_until`/`_backoff_minutes` globals. Exponential: doubles on each 429, resets on success, caps at 30min. Currently only on TOI; can be applied to other sources.
