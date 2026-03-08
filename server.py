@@ -999,9 +999,11 @@ def fetch_toi() -> None:
             })
         logger.info(f"Got {len(rss_items)} items from TOI RSS")
 
-    # Build list of liveblog URLs to try (base URL + date-specific)
-    # Use Israel time since TOI publishes on Israel schedule
-    liveblog_urls = [TOI_LIVEBLOG_URL]
+    # Build list of liveblog URLs to try — date-specific FIRST, base URL last.
+    # The base /liveblog/ URL points to a stale 2020 archive page, so it must
+    # only be tried as a last resort after current date-specific URLs.
+    # Use Israel time since TOI publishes on Israel schedule.
+    liveblog_urls = []
     try:
         now_israel = datetime.now(ZoneInfo("Asia/Jerusalem"))
         yesterday_israel = now_israel - timedelta(days=1)
@@ -1016,6 +1018,7 @@ def fetch_toi() -> None:
                     liveblog_urls.append(date_url)
     except Exception as e:
         logger.debug(f"Error building liveblog date URLs: {e}")
+    liveblog_urls.append(TOI_LIVEBLOG_URL)  # Stale fallback — last resort
 
     # Try each liveblog URL until one works (stop on rate limit)
     for url in liveblog_urls:
