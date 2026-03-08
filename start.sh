@@ -49,6 +49,19 @@ if [ ! -f "venv/.deps_installed" ]; then
     fi
 fi
 
+# ---- Duplicate-instance guard ----
+# Prevent multiple start.sh from running concurrently (root cause of Shabbos #2 failure)
+EXISTING_PID=$(lsof -i :8080 -t 2>/dev/null)
+if [ -n "$EXISTING_PID" ]; then
+    echo -e "${RED}ERROR: Port 8080 already in use by PID $EXISTING_PID${NC}"
+    echo -e "${YELLOW}Another instance is already running.${NC}"
+    echo ""
+    echo "To kill all existing instances and start fresh:"
+    echo "  pkill -f 'start.sh' ; pkill -f 'server.py'"
+    echo ""
+    exit 1
+fi
+
 # Get local IP for easy access from other devices
 LOCAL_IP=$(ipconfig getifaddr en0 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}')
 
@@ -81,6 +94,12 @@ while true; do
     echo -e "${RED}Server exited with code $EXIT_CODE. Restarting in 5 seconds...${NC}"
     echo -e "${YELLOW}(Press Ctrl+C to stop)${NC}"
     sleep 5
+    # Re-check port before restarting (another instance may have claimed it)
+    EXISTING_PID=$(lsof -i :8080 -t 2>/dev/null)
+    if [ -n "$EXISTING_PID" ]; then
+        echo -e "${RED}Port 8080 now in use by PID $EXISTING_PID. Exiting restart loop.${NC}"
+        exit 1
+    fi
     echo -e "${GREEN}Restarting server...${NC}"
     echo ""
 done

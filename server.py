@@ -395,15 +395,32 @@ def extract_text_with_links(html_text: str) -> str:
     return unescape(text)
 
 
-def safe_request(url: str, timeout: int = REQUEST_TIMEOUT) -> Optional[requests.Response]:
-    """Make a request with error handling."""
+class RateLimitError(Exception):
+    """Raised when a request gets a 429 response."""
+    pass
+
+
+def safe_request(url: str, timeout: int = REQUEST_TIMEOUT, raise_on_429: bool = False) -> Optional[requests.Response]:
+    """Make a request with error handling.
+
+    Args:
+        raise_on_429: If True, raises RateLimitError on 429 instead of returning None.
+                      Callers that need backoff logic should set this.
+    """
     try:
         headers = {
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
         }
         response = requests.get(url, timeout=timeout, headers=headers)
+        if response.status_code == 429:
+            logger.warning(f"Rate limited (429) by {url}")
+            if raise_on_429:
+                raise RateLimitError(f"429 from {url}")
+            return None
         response.raise_for_status()
         return response
+    except RateLimitError:
+        raise
     except Exception as e:
         logger.warning(f"Request failed for {url}: {e}")
         return None
@@ -913,14 +930,31 @@ def fetch_reuters() -> None:
 
 # ============ TIMES OF ISRAEL FETCHER ============
 
+# Exponential backoff state for TOI rate limiting (429s)
+_toi_backoff_until: Optional[datetime] = None
+_toi_backoff_minutes: int = 5  # Starting backoff; doubles on consecutive 429s, caps at 30
+
 def fetch_toi() -> None:
     """Fetch Times of Israel from RSS and liveblog."""
+    global _toi_backoff_until, _toi_backoff_minutes
+
+    # Skip if we're in a backoff period from a previous 429
+    if _toi_backoff_until and datetime.now() < _toi_backoff_until:
+        remaining = (_toi_backoff_until - datetime.now()).total_seconds() / 60
+        logger.info(f"TOI: skipping fetch, rate-limit backoff active ({remaining:.0f}m remaining)")
+        return
+
     logger.info("Fetching Times of Israel...")
     rss_items = []
     liveblog_items = []
+    got_rate_limited = False
 
     # Fetch RSS feed (always, independent of liveblog)
-    response = safe_request(TOI_RSS_URL)
+    try:
+        response = safe_request(TOI_RSS_URL, raise_on_429=True)
+    except RateLimitError:
+        response = None
+        got_rate_limited = True
     if response:
         feed = feedparser.parse(response.content)
         for entry in feed.entries[:10]:
@@ -952,9 +986,13 @@ def fetch_toi() -> None:
     except Exception as e:
         logger.debug(f"Error building liveblog date URLs: {e}")
 
-    # Try each liveblog URL until one works
+    # Try each liveblog URL until one works (stop on rate limit)
     for url in liveblog_urls:
-        response = safe_request(url)
+        try:
+            response = safe_request(url, raise_on_429=True)
+        except RateLimitError:
+            got_rate_limited = True
+            break  # Stop trying more URLs — we're rate-limited
         if response:
             soup = BeautifulSoup(response.content, "html.parser")
             liveblog_items = parse_toi_liveblog(soup, url)
@@ -965,6 +1003,12 @@ def fetch_toi() -> None:
     if not liveblog_items:
         logger.warning(f"TOI liveblog: no items from any URL. Tried: {liveblog_urls}")
 
+    # Activate exponential backoff on 429
+    if got_rate_limited:
+        _toi_backoff_until = datetime.now() + timedelta(minutes=_toi_backoff_minutes)
+        logger.warning(f"TOI rate-limited, backing off for {_toi_backoff_minutes}m")
+        _toi_backoff_minutes = min(_toi_backoff_minutes * 2, 30)  # Double up to 30m cap
+
     # Combine: liveblog items first, then RSS
     items = liveblog_items + rss_items
 
@@ -974,14 +1018,19 @@ def fetch_toi() -> None:
             "last_updated": datetime.now(),
             "error": None if liveblog_items else "Liveblog unavailable, showing RSS only",
         }
+        # Reset backoff on successful fetch
+        if not got_rate_limited:
+            _toi_backoff_until = None
+            _toi_backoff_minutes = 5
     else:
-        # Both liveblog and RSS failed — clear stale items so dashboard
-        # doesn't show hours-old content that looks current
-        cache["toi_liveblog"] = {
-            "items": [],
-            "last_updated": cache["toi_liveblog"].get("last_updated"),
-            "error": "Could not fetch TOI content",
-        }
+        # Both liveblog and RSS failed — preserve last-good items rather than
+        # showing an empty column (stale data beats no data on Shabbos)
+        old_items = cache["toi_liveblog"].get("items", [])
+        if old_items:
+            cache["toi_liveblog"]["error"] = "Showing cached content (fetch failed)"
+            logger.warning("TOI fetch failed, preserving %d cached items", len(old_items))
+        else:
+            cache["toi_liveblog"]["error"] = "Could not fetch TOI content"
 
 
 def parse_toi_liveblog(soup, source_url: str = "") -> List[Dict]:
@@ -1624,6 +1673,23 @@ def _watchdog_loop():
 
 
 if __name__ == "__main__":
+    import socket
+    import sys
+
+    # Fail fast if port is already in use — prevents doomed instances from
+    # wasting 30+ HTTP requests on update_all_feeds() before discovering
+    # they can't bind the port (root cause of Shabbos #2 failure)
+    _test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        _test_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        _test_sock.bind((HOST, PORT))
+        _test_sock.close()
+        logger.info(f"Port {PORT} is available")
+    except OSError:
+        logger.error(f"Port {PORT} already in use — exiting to avoid wasted API calls")
+        _test_sock.close()
+        sys.exit(1)
+
     # Load cached data from disk (instant dashboard on restart)
     if load_cache_from_disk():
         logger.info("Dashboard will show cached data while feeds refresh")
