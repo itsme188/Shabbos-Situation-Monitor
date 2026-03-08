@@ -150,7 +150,6 @@
         .feed-header.trump .indicator { background: var(--accent-clay); }
         .feed-header.iran .indicator { background: var(--accent-dusty-rose); }
         .feed-header.toi .indicator { background: var(--accent-moss); }
-        .feed-header.polymarket .indicator { background: var(--accent-sage); }
         .feed-header.ai-summary .indicator { background: var(--accent-sand); }
 
         .feed-count {
@@ -227,6 +226,16 @@
             color: var(--text-muted);
             text-align: center;
             font-size: 0.85rem;
+        }
+
+        .cached-warning {
+            padding: 0.35rem 1rem;
+            background: #fef9ec;
+            border-bottom: 1px solid var(--accent-clay);
+            color: var(--accent-clay);
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            font-size: 0.7rem;
+            font-style: italic;
         }
 
         .liveblog-tag {
@@ -529,6 +538,9 @@
                 {% elif not cache['twitter_list']['items'] %}
                     <div class="no-items">No items available</div>
                 {% else %}
+                    {% if cache['twitter_list']['error'] %}
+                    <div class="cached-warning">{{ cache['twitter_list']['error'] }}</div>
+                    {% endif %}
                     {% for item in cache['twitter_list']['items'] %}
                     <div class="feed-item">
                         <div class="item-meta">
@@ -558,12 +570,15 @@
                     {{ stale_badge(cache['trump']['last_updated'], generated_at) }}
                 </span>
             </div>
-            <div class="feed-content">
+            <div class="feed-content" id="trump-scroll">
                 {% if cache['trump']['error'] and not cache['trump']['items'] %}
                     <div class="error-message">{{ cache['trump']['error'] }}</div>
                 {% elif not cache['trump']['items'] %}
                     <div class="no-items">No items available</div>
                 {% else %}
+                    {% if cache['trump']['error'] %}
+                    <div class="cached-warning">{{ cache['trump']['error'] }}</div>
+                    {% endif %}
                     {% for item in cache['trump']['items'] %}
                     <div class="feed-item">
                         <div class="item-meta">
@@ -585,12 +600,15 @@
                     {{ stale_badge(cache['reuters']['last_updated'], generated_at) }}
                 </span>
             </div>
-            <div class="feed-content">
+            <div class="feed-content" id="reuters-scroll">
                 {% if cache['reuters']['error'] and not cache['reuters']['items'] %}
                     <div class="error-message">{{ cache['reuters']['error'] }}</div>
                 {% elif not cache['reuters']['items'] %}
                     <div class="no-items">No news found</div>
                 {% else %}
+                    {% if cache['reuters']['error'] %}
+                    <div class="cached-warning">{{ cache['reuters']['error'] }}</div>
+                    {% endif %}
                     {% for item in cache['reuters']['items'] %}
                     <div class="feed-item">
                         <div class="item-meta">
@@ -617,12 +635,15 @@
                     {{ stale_badge(cache['toi_liveblog']['last_updated'], generated_at) }}
                 </span>
             </div>
-            <div class="feed-content">
+            <div class="feed-content" id="toi-scroll">
                 {% if cache['toi_liveblog']['error'] and not cache['toi_liveblog']['items'] %}
                     <div class="error-message">{{ cache['toi_liveblog']['error'] }}</div>
                 {% elif not cache['toi_liveblog']['items'] %}
                     <div class="no-items">No updates available</div>
                 {% else %}
+                    {% if cache['toi_liveblog']['error'] %}
+                    <div class="cached-warning">{{ cache['toi_liveblog']['error'] }}</div>
+                    {% endif %}
                     {% for item in cache['toi_liveblog']['items'] %}
                     <div class="feed-item">
                         <div class="item-meta">
@@ -858,6 +879,9 @@
             }, intervalTime);
         }
         setupAutoScroll('twitter-scroll');
+        setupAutoScroll('trump-scroll');
+        setupAutoScroll('reuters-scroll');
+        setupAutoScroll('toi-scroll');
         setupAutoScroll('ai-scroll');
     </script>
 </body>

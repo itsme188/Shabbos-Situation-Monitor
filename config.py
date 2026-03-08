@@ -23,9 +23,9 @@ TWITTER_ACCOUNTS = [
     "IntelCrab",
     "Global_Mil_Info",
     "AuroraIntel",
-    "IsraelRadar_",
+    # "IsraelRadar_",   # JS-rendered page — unfetchable without headless browser
     "JoeTruzman",
-    "YoavLimor",
+    # "YoavLimor",      # JS-rendered page — unfetchable without headless browser
     "AmichaiStein1",
 ]
 
@@ -35,6 +35,9 @@ TRUMP_TWITTER_MIRROR = "TrumpDailyPosts"  # Fallback Twitter account
 
 # Google News Middle East/Iran (more reliable than Reuters RSS)
 REUTERS_MIDEAST_RSS = "https://news.google.com/rss/search?q=Iran+OR+Israel+Middle+East&hl=en-US&gl=US&ceid=US:en"
+
+# Fallback: BBC World Middle East RSS (reliable, low rate-limit risk)
+REUTERS_FALLBACK_RSS = "https://feeds.bbci.co.uk/news/world/middle_east/rss.xml"
 
 # Nitter instances to try (in order of reliability)
 # Most are dead as of Mar 2026 — xcancel.com is the only one that sometimes works
@@ -76,17 +79,12 @@ TOI_LIVEBLOG_DATE_PATTERNS = [
     "https://www.timesofisrael.com/liveblog-{month}-{day:02d}-{year}/",
 ]
 
-# Polymarket - Iran/Israel strike prediction market (multi-outcome, auto-soonest date)
-POLYMARKET_EVENT_SLUG = "usisrael-strikes-iran-by"
-POLYMARKET_API_URL = "https://gamma-api.polymarket.com/events"
-
 # Shabbos timing - location & candle lighting
 LOCATION_LAT = 40.7128    # New York City
 LOCATION_LON = -74.0060
 LOCATION_TZ = "America/New_York"
 CANDLE_LIGHTING_OFFSET = 18  # minutes before sunset
 HAVDALAH_OFFSET = 50         # minutes after Saturday sunset
-SHABBOS_SNAPSHOT_FILE = "shabbos_snapshot.json"
 
 # Cache persistence (survives server restarts)
 CACHE_FILE = "feed_cache.json"
@@ -99,9 +97,8 @@ MAX_ITEMS_PER_FEED = 15
 REQUEST_TIMEOUT = 15  # seconds - general
 NITTER_TIMEOUT = 8    # seconds - shorter for Nitter (responds fast or not at all)
 
-# twikit authentication (optional - for Iran search with like filter)
-# Run `python setup_twikit.py` once to authenticate
-TWIKIT_COOKIES_FILE = "twikit_cookies.json"
+# twikit authentication — not implemented yet (setup_twikit.py does not exist)
+# Kept as placeholder for potential future Twitter API integration
 
 # AI Summary settings (requires ANTHROPIC_API_KEY environment variable)
 AI_SUMMARY_MAX_TOKENS = 1024
