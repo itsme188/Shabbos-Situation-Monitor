@@ -8,19 +8,19 @@
 
 ## Architecture
 - Flask on Python 3, port 8080, binds 0.0.0.0
-- APScheduler refreshes feeds every 5 min; watchdog thread recovers silent failures
-- `feed_cache.json` persists across restarts (max 2hr age, atomic writes)
+- APScheduler refreshes feeds every 5 min; watchdog checks per-feed staleness (not aggregate)
+- `feed_cache.json` persists across restarts (max 2hr age, atomic writes, `schema_version: 1`, backoff state)
 - `start.sh` has auto-restart loop, venv management, graceful SIGINT handling, **port-check guard** against duplicate instances
 
 ## Key Files
 - `server.py` — main app (~1020 lines), routes, scheduler, all feed fetchers
-- `config.py` — HOST, PORT, REFRESH_INTERVAL, feed URLs, OSINT account lists (13 accounts)
+- `config.py` — HOST, PORT, REFRESH_INTERVAL, feed URLs, OSINT account lists (11 accounts)
 - `start.sh` — production launcher with crash recovery
-- `launcher.applescript` — macOS one-click startup
+- `launcher.applescript` — macOS one-click startup (health-polls, reuses Safari tabs, error dialog)
 - `templates/index.html` — dashboard template
 
 ## Known Issues (from first Shabbos run, Feb 27 2026 — grade: B-)
-- ~~**Polymarket:** resolved markets vanish from feed with no fallback~~ — FIXED: Resolved markets now show with YES/NO badge. Display capped to all active + 1 most-recently-resolved. Delta matches by market title, not array position.
+- ~~**Polymarket:** resolved markets vanish from feed with no fallback~~ — REMOVED: Polymarket fully removed in PR #7.
 - ~~**Twitter:** hours-long gaps with no updates~~ — FIXED: 4-tier fallback (syndication → BlueSky → Nitter RSS → Nitter HTML), xcancel.com with "mistique" UA, Google News as last resort with source attribution
 - ~~**Times of Israel liveblog:** went silent for hours~~ — FIXED: Israel timezone for date URLs, zero-padded format variant, structural CSS fallback, stale cache clearing
 - ~~**Trump Truth Social:** posts containing links show opaque URLs instead of readable content~~ — FIXED: `extract_text_with_links()` now shows destination URLs inline. Empty media-only/retruth posts are filtered out.
@@ -43,18 +43,20 @@
 - `update_all_feeds()` runs all fetchers concurrently via ThreadPoolExecutor
 - **OSINT column** (UI label) backed by `twitter_list` cache key — internal names kept for cache compatibility
 - OSINT uses 5-tier fallback: syndication → TwStalker → BlueSky → Nitter RSS → Nitter HTML → Google News
-- **TwStalker** (`twstalker.com`): primary source, works for 11/13 accounts. Uses `curl` subprocess (not Python `requests`) because TwStalker blocks via TLS fingerprinting. `threading.Semaphore(2)` rate-limits concurrent requests. IsraelRadar_ and YoavLimor use JS-rendered pages (unfetchable without headless browser)
+- **TwStalker** (`twstalker.com`): primary source, works for 11 active accounts. Uses `curl` subprocess (not Python `requests`) because TwStalker blocks via TLS fingerprinting. `threading.Semaphore(2)` rate-limits concurrent requests. IsraelRadar_ and YoavLimor use JS-rendered pages (unfetchable without headless browser)
 - BlueSky (`public.api.bsky.app`): open API, no auth. Only Faytuks is active on BlueSky (others dormant). `BLUESKY_HANDLES` in config
 - Nitter: only xcancel.com remains (5 dead instances removed Mar 2026). RSS returns "not whitelisted"; HTML scraping rate-limited
 - When all Twitter methods fail, Google News fallback fires — extracts actual source name from title, marks `source: "google_news"` for dynamic column header
-- Polymarket filters out closed/resolved markets and sorts by soonest deadline
-- Shabbos snapshot captures Polymarket probability at candle lighting for delta display
+- ~~Polymarket~~ — fully removed in PR #7
 - Trump RSS (`trumpstruth.org/feed`): many entries are media-only (`<p></p>` body) — always extract text before deciding to include
+- Reuters has BBC World Middle East RSS (`REUTERS_FALLBACK_RSS`) as fallback source
+- Trump and Reuters have exponential backoff (same pattern as TOI/xcancel)
+- AI summary retries once on transient API errors (529, connection, rate limit); auth errors fail immediately
 
 ## Timestamps
 - All timestamps use `format_timestamp()` → `strftime('%a %-I:%M %p')` → "Fri 2:30 PM"
 - `%-I` is macOS/POSIX only (no leading zero on 12-hour time)
-- Polymarket top bar removed (backend fetcher still runs). Candle lighting time relocated to header status bar.
+- Candle lighting time in header status bar.
 
 ## AI Summary
 - **Schedule-aware generation** (cron at :05 past each hour, ET timezone):
@@ -84,6 +86,6 @@
 - ~~**start.sh needs a PID/lock guard**~~ — DONE: Port check at startup + inside crash-loop
 - ~~**server.py must check port BEFORE doing work**~~ — DONE: Socket bind test in `__main__` before any fetching
 - ~~**Failed fetches should preserve last-good cache**~~ — DONE for TOI: preserves old items on failure
-- **Rate-limit backoff pattern**: `RateLimitError` exception + `safe_request(raise_on_429=True)` + per-source `_backoff_until`/`_backoff_minutes` globals. Exponential: doubles on each 429, resets on success, caps at 30min. Now on TOI and xcancel.
+- **Rate-limit backoff pattern**: `RateLimitError` exception + `safe_request(raise_on_429=True)` + per-source `_backoff_until`/`_backoff_minutes` globals. Exponential: doubles on each 429, resets on success, caps at 30min. Now on TOI, xcancel, Trump, and Reuters. Backoff state persists in `feed_cache.json` across restarts.
 - **TOI liveblog URL ordering**: Date-specific URLs must be tried before the base `/liveblog/` URL, which points to a frozen 2020 archive. The structural fallback is too good — it finds entries on stale pages, so URL priority matters.
 - **Always test with live data**: Import validation and syntax checks don't catch data-quality bugs like stale URLs returning old content. Run the actual fetcher and inspect the output.
