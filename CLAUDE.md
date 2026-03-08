@@ -51,14 +51,22 @@
 - Shabbos snapshot captures Polymarket probability at candle lighting for delta display
 - Trump RSS (`trumpstruth.org/feed`): many entries are media-only (`<p></p>` body) — always extract text before deciding to include
 
+## Timestamps
+- All timestamps use `format_timestamp()` → `strftime('%a %-I:%M %p')` → "Fri 2:30 PM"
+- `%-I` is macOS/POSIX only (no leading zero on 12-hour time)
+- Polymarket top bar removed (backend fetcher still runs). Candle lighting time relocated to header status bar.
+
 ## AI Summary
-- **Hourly accumulation**: Each hour generates a summary (max 24 stored). Prepended to list, capped at 24 entries
-- **12-hour overview**: Opus generates a paragraph every 3 hours from accumulated hourly summaries. Pinned at top of column
-- **Two-model strategy**: Haiku for hourly (fast/cheap), Opus for overview (best quality)
-- Prompt requires `[Category] HH:MM - description` format. Parser regex handles dash variants `[-–—]`
+- **Schedule-aware generation** (cron at :05 past each hour, ET timezone):
+  - 1-7 AM: quiet hours, no generation
+  - 8 AM: morning summary (Opus, multi-paragraph prose covering last 8 hours)
+  - 10 AM, 12 PM, 2 PM, 4 PM, 6 PM, 8 PM, 10 PM, 12 AM: regular 2-hour bullet summaries (Haiku)
+- **Two-model strategy**: Haiku for regular 2-hour summaries (fast/cheap), Opus for morning summary (best quality)
+- Prompt requires `[Category] Day H:MM AM/PM - description` format. Parser regex handles both old 24-hour and new AM/PM formats, dash variants `[-–—]`
 - All times in ET. Feed digest includes timezone context header for the LLM
 - Valid categories: Military, Diplomatic, Political, Breaking, Markets
-- Cache fields: `hourly_summaries[]`, `overview`, `overview_updated` — all persisted to `feed_cache.json`
+- Cache fields: `summaries[]`, `morning_summary` — all persisted to `feed_cache.json`
+- Manual refresh (`/api/refresh-ai`) uses `force=True` to bypass schedule check
 
 ## Lessons & Best Practices
 - **Truthy-but-empty HTML**: RSS fields like `<p></p>` are truthy strings that yield nothing after stripping. Always validate *processed* output, not raw input, before using it.
