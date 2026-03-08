@@ -19,6 +19,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from logging.handlers import RotatingFileHandler
 from typing import Dict, List, Optional
+from email.utils import parsedate_to_datetime
 from html import unescape
 from zoneinfo import ZoneInfo
 import re
@@ -68,17 +69,16 @@ AI_INACTIVITY_TIMEOUT = 1800  # 30 minutes — pause AI after this long with no 
 from config import (
     HOST, PORT, DEBUG, REFRESH_INTERVAL,
     TWITTER_ACCOUNTS, TRUMP_TRUTH_RSS, TRUMP_TWITTER_MIRROR,
-    REUTERS_MIDEAST_RSS,
+    REUTERS_MIDEAST_RSS, REUTERS_FALLBACK_RSS,
     NITTER_INSTANCES, NITTER_TIMEOUT, TOI_RSS_URL, TOI_LIVEBLOG_URL,
     TOI_LIVEBLOG_DATE_PATTERNS,
     GOOGLE_NEWS_TWITTER_FALLBACK, TWITTER_TOPIC_QUERIES,
     TWITTER_SYNDICATION_TIMEOUT, TWITTER_ACCOUNT_TIMEOUT, XCANCEL_USER_AGENT,
     BLUESKY_HANDLES, BLUESKY_API_BASE,
     TWSTALKER_BASE, TWSTALKER_TIMEOUT,
-    POLYMARKET_EVENT_SLUG, POLYMARKET_API_URL,
     MAX_ITEMS_PER_FEED, REQUEST_TIMEOUT,
     LOCATION_LAT, LOCATION_LON, LOCATION_TZ,
-    CANDLE_LIGHTING_OFFSET, HAVDALAH_OFFSET, SHABBOS_SNAPSHOT_FILE,
+    CANDLE_LIGHTING_OFFSET, HAVDALAH_OFFSET,
     CACHE_FILE, CACHE_MAX_AGE,
     AI_SUMMARY_MAX_TOKENS,
     AI_SUMMARY_MORNING_HOUR, AI_SUMMARY_REGULAR_HOURS, AI_SUMMARY_QUIET_HOURS,
@@ -115,7 +115,6 @@ cache: Dict = {
     "trump": {"items": [], "last_updated": None, "error": None},
     "reuters": {"items": [], "last_updated": None, "error": None},
     "toi_liveblog": {"items": [], "last_updated": None, "error": None},
-    "polymarket": {"items": [], "last_updated": None, "error": None},
     "ai_summary": {
         "items": [],
         "last_updated": None,
@@ -147,12 +146,28 @@ def save_cache_to_disk() -> None:
                 entry["summaries"] = feed_data.get("summaries", [])
                 entry["morning_summary"] = feed_data.get("morning_summary")
             serializable[feed_name] = entry
+        # Build backoff state for persistence across crash-restarts
+        backoff_state = {
+            "toi_backoff_until": _toi_backoff_until.isoformat() if _toi_backoff_until else None,
+            "toi_backoff_minutes": _toi_backoff_minutes,
+            "xcancel_backoff_until": _xcancel_backoff_until.isoformat() if _xcancel_backoff_until else None,
+            "xcancel_backoff_minutes": _xcancel_backoff_minutes,
+            "trump_backoff_until": _trump_backoff_until.isoformat() if _trump_backoff_until else None,
+            "trump_backoff_minutes": _trump_backoff_minutes,
+            "reuters_backoff_until": _reuters_backoff_until.isoformat() if _reuters_backoff_until else None,
+            "reuters_backoff_minutes": _reuters_backoff_minutes,
+        }
         # Atomic write: write to temp file in same directory, then rename
         dir_name = os.path.dirname(os.path.abspath(CACHE_FILE))
         fd, tmp_path = tempfile.mkstemp(dir=dir_name, suffix=".tmp")
         try:
             with os.fdopen(fd, "w") as f:
-                json.dump({"saved_at": datetime.now().isoformat(), "feeds": serializable}, f)
+                json.dump({
+                    "saved_at": datetime.now().isoformat(),
+                    "schema_version": 1,
+                    "feeds": serializable,
+                    "backoff_state": backoff_state,
+                }, f)
             os.replace(tmp_path, CACHE_FILE)
         except Exception:
             # Clean up temp file if rename failed
@@ -195,11 +210,53 @@ def load_cache_from_disk() -> bool:
                     cache[feed_name]["summaries"] = feed_data.get("summaries", [])
                     cache[feed_name]["morning_summary"] = feed_data.get("morning_summary")
                 loaded_count += 1
+        # Restore backoff state so crash-restarts don't re-hammer rate-limited services
+        _restore_backoff_state(data)
         logger.info(f"Loaded {loaded_count} feeds from disk cache ({age/60:.1f}m old)")
         return loaded_count > 0
     except (FileNotFoundError, json.JSONDecodeError, KeyError, ValueError) as e:
         logger.debug(f"Could not load cache from disk: {e}")
         return False
+
+
+def _restore_backoff_state(data: dict) -> None:
+    """Restore backoff globals from persisted cache state.
+
+    Called once at startup from load_cache_from_disk(). Prevents crash-restarts
+    from immediately re-hammering services that were being rate-limited.
+    """
+    global _toi_backoff_until, _toi_backoff_minutes
+    global _xcancel_backoff_until, _xcancel_backoff_minutes
+    global _trump_backoff_until, _trump_backoff_minutes
+    global _reuters_backoff_until, _reuters_backoff_minutes
+
+    bs = data.get("backoff_state", {})
+    if not bs:
+        return
+
+    now = datetime.now()
+    restored = []
+
+    for name, until_key, minutes_key, default_minutes in [
+        ("TOI", "toi_backoff_until", "toi_backoff_minutes", 5),
+        ("xcancel", "xcancel_backoff_until", "xcancel_backoff_minutes", 5),
+        ("Trump", "trump_backoff_until", "trump_backoff_minutes", 5),
+        ("Reuters", "reuters_backoff_until", "reuters_backoff_minutes", 5),
+    ]:
+        until_str = bs.get(until_key)
+        minutes_val = bs.get(minutes_key, default_minutes)
+        if until_str:
+            until_dt = datetime.fromisoformat(until_str)
+            if until_dt > now:
+                remaining = (until_dt - now).total_seconds() / 60
+                restored.append(f"{name}({remaining:.0f}m)")
+                # Set the globals dynamically
+                globals()[f"_{until_key}"] = until_dt
+                globals()[f"_{minutes_key}"] = minutes_val
+            # If expired, leave globals at defaults (None / 5)
+
+    if restored:
+        logger.info(f"Restored active backoff state: {', '.join(restored)}")
 
 
 # ============ SHABBOS TIME CALCULATIONS ============
@@ -255,46 +312,6 @@ def is_shabbos() -> bool:
     return times["candle_lighting"] <= now <= times["havdalah"]
 
 
-def save_shabbos_snapshot(probability: int, market_title: str) -> None:
-    """Persist the soonest market's probability at candle lighting."""
-    times = get_shabbos_times()
-    snapshot = {
-        "shabbos_friday": times["friday_date"].isoformat(),
-        "probability": probability,
-        "market_title": market_title,
-        "candle_lighting": times["candle_lighting"].isoformat(),
-    }
-    try:
-        with open(SHABBOS_SNAPSHOT_FILE, "w") as f:
-            json.dump(snapshot, f)
-        logger.info(f"Shabbos snapshot saved: {market_title} at {probability}%")
-    except Exception as e:
-        logger.warning(f"Failed to save Shabbos snapshot: {e}")
-
-
-def load_shabbos_snapshot() -> Optional[Dict]:
-    """Load the saved snapshot if it belongs to the current Shabbos."""
-    try:
-        with open(SHABBOS_SNAPSHOT_FILE) as f:
-            data = json.load(f)
-        times = get_shabbos_times()
-        if data.get("shabbos_friday") == times["friday_date"].isoformat():
-            return data
-    except (FileNotFoundError, json.JSONDecodeError, KeyError):
-        pass
-    return None
-
-
-def clear_expired_snapshot() -> None:
-    """Remove the snapshot file after Shabbos ends."""
-    try:
-        if os.path.exists(SHABBOS_SNAPSHOT_FILE):
-            os.remove(SHABBOS_SNAPSHOT_FILE)
-            logger.info("Cleared expired Shabbos snapshot")
-    except Exception as e:
-        logger.warning(f"Failed to clear Shabbos snapshot: {e}")
-
-
 # Nitter instance health tracking
 nitter_health: Dict[str, Dict] = {
     instance: {"failures": 0, "last_success": None, "last_failure": None}
@@ -325,6 +342,14 @@ def record_nitter_failure(instance: str):
 _xcancel_backoff_until: Optional[datetime] = None
 _xcancel_backoff_minutes: int = 5  # Starting backoff; doubles on consecutive 429s, caps at 30
 
+# Exponential backoff state for Trump feed (trumpstruth.org) rate limiting
+_trump_backoff_until: Optional[datetime] = None
+_trump_backoff_minutes: int = 5
+
+# Exponential backoff state for Reuters/Google News rate limiting
+_reuters_backoff_until: Optional[datetime] = None
+_reuters_backoff_minutes: int = 5
+
 
 # Nitter error patterns - these appear as RSS entry content when the instance
 # is broken but still returns valid RSS XML with an error message as the entry
@@ -353,13 +378,12 @@ def format_timestamp(timestamp_str: str) -> str:
         # Try parsing ISO format
         dt = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
         return dt.strftime('%a %-I:%M %p')
-    except:
+    except (ValueError, TypeError):
         try:
-            # Try RSS format
-            from email.utils import parsedate_to_datetime
+            # Try RSS format (parsedate_to_datetime imported at module level)
             dt = parsedate_to_datetime(timestamp_str)
             return dt.strftime('%a %-I:%M %p')
-        except:
+        except (ValueError, TypeError):
             return timestamp_str[:16] if timestamp_str else ""
 
 
@@ -586,6 +610,30 @@ def _fetch_via_twstalker(username: str) -> List[Dict]:
         return []
 
 
+def _relative_to_iso(relative_str: str) -> str:
+    """Convert a relative timestamp like '3 hours ago' to an approximate ISO string.
+
+    Used for TwStalker results which only provide relative times.
+    The resulting timestamps are approximate (±1 unit) but sufficient for sort ordering.
+    """
+    if not relative_str:
+        return ""
+    m = re.match(r'(\d+)\s+(second|minute|hour|day|week|month)s?\s+ago', relative_str, re.I)
+    if not m:
+        return ""
+    amount, unit = int(m.group(1)), m.group(2).lower()
+    delta_map = {
+        "second": timedelta(seconds=amount),
+        "minute": timedelta(minutes=amount),
+        "hour": timedelta(hours=amount),
+        "day": timedelta(days=amount),
+        "week": timedelta(weeks=amount),
+        "month": timedelta(days=amount * 30),
+    }
+    approx_time = datetime.now() - delta_map.get(unit, timedelta(0))
+    return approx_time.isoformat()
+
+
 def parse_twstalker_profile(html: str, username: str) -> List[Dict]:
     """Parse TwStalker profile page for tweets."""
     items = []
@@ -640,7 +688,7 @@ def parse_twstalker_profile(html: str, username: str) -> List[Dict]:
             items.append({
                 "author": author,
                 "text": text,
-                "timestamp": "",  # Relative only, no ISO timestamp available
+                "timestamp": _relative_to_iso(timestamp_display),  # Approximate ISO for sorting
                 "timestamp_display": timestamp_display,
                 "link": link,
             })
@@ -838,10 +886,24 @@ def parse_nitter_profile(html: str, username: str) -> List[Dict]:
 
 def fetch_trump() -> None:
     """Fetch Trump's Truth Social posts via RSS."""
+    global _trump_backoff_until, _trump_backoff_minutes
+
+    # Respect rate-limit backoff
+    if _trump_backoff_until and datetime.now() < _trump_backoff_until:
+        remaining = (_trump_backoff_until - datetime.now()).total_seconds() / 60
+        logger.info(f"Trump: skipping fetch, rate-limit backoff active ({remaining:.0f}m remaining)")
+        return
+
     logger.info("Fetching Trump Truth Social...")
 
     # Primary: trumpstruth.org RSS feed
-    response = safe_request(TRUMP_TRUTH_RSS)
+    got_rate_limited = False
+    try:
+        response = safe_request(TRUMP_TRUTH_RSS, raise_on_429=True)
+    except RateLimitError:
+        response = None
+        got_rate_limited = True
+
     if response:
         feed = feedparser.parse(response.content)
         if feed.entries:
@@ -869,10 +931,19 @@ def fetch_trump() -> None:
                 "last_updated": datetime.now(),
                 "error": None,
             }
+            # Reset backoff on success
+            _trump_backoff_until = None
+            _trump_backoff_minutes = 5
             logger.info(f"Got {len(items)} Trump posts from Truth Social RSS")
             return
 
+    if got_rate_limited:
+        _trump_backoff_until = datetime.now() + timedelta(minutes=_trump_backoff_minutes)
+        logger.warning(f"Trump feed rate-limited, backing off for {_trump_backoff_minutes}m")
+        _trump_backoff_minutes = min(_trump_backoff_minutes * 2, 30)
+
     # Fallback: Try Twitter mirror account via Nitter
+    # (Nitter uses a different host, so Trump backoff doesn't block it)
     logger.info("Trying Twitter mirror fallback for Trump...")
     for instance in get_healthy_nitter_instances()[:4]:
         url = f"https://{instance}/{TRUMP_TWITTER_MIRROR}/rss"
@@ -920,35 +991,61 @@ def fetch_trump() -> None:
 # ============ REUTERS MIDDLE EAST FETCHER ============
 
 def fetch_reuters() -> None:
-    """Fetch Reuters Middle East news via RSS."""
-    logger.info("Fetching Reuters Middle East...")
+    """Fetch Middle East news via RSS with fallback sources."""
+    global _reuters_backoff_until, _reuters_backoff_minutes
 
-    response = safe_request(REUTERS_MIDEAST_RSS)
-    if response:
-        feed = feedparser.parse(response.content)
-        if feed.entries:
-            items = []
-            for entry in feed.entries[:MAX_ITEMS_PER_FEED]:
-                items.append({
-                    "title": entry.get("title", ""),
-                    "summary": clean_html(entry.get("summary", ""))[:250],
-                    "timestamp": entry.get("published", ""),
-                    "timestamp_display": format_timestamp(entry.get("published", "")),
-                    "link": entry.get("link", ""),
-                })
+    # Respect rate-limit backoff
+    if _reuters_backoff_until and datetime.now() < _reuters_backoff_until:
+        remaining = (_reuters_backoff_until - datetime.now()).total_seconds() / 60
+        logger.info(f"Reuters: skipping fetch, rate-limit backoff active ({remaining:.0f}m remaining)")
+        return
 
-            cache["reuters"] = {
-                "items": items,
-                "last_updated": datetime.now(),
-                "error": None,
-            }
-            logger.info(f"Got {len(items)} items from Reuters Middle East")
-            return
+    logger.info("Fetching Middle East news...")
 
-    # Failed
+    # Try sources in order: primary Google News, then BBC fallback
+    sources = [
+        (REUTERS_MIDEAST_RSS, "Google News"),
+        (REUTERS_FALLBACK_RSS, "BBC World"),
+    ]
+
+    for url, source_name in sources:
+        try:
+            response = safe_request(url, raise_on_429=True)
+        except RateLimitError:
+            _reuters_backoff_until = datetime.now() + timedelta(minutes=_reuters_backoff_minutes)
+            logger.warning(f"Reuters/{source_name} rate-limited, backing off for {_reuters_backoff_minutes}m")
+            _reuters_backoff_minutes = min(_reuters_backoff_minutes * 2, 30)
+            continue
+
+        if response:
+            feed = feedparser.parse(response.content)
+            if feed.entries:
+                items = []
+                for entry in feed.entries[:MAX_ITEMS_PER_FEED]:
+                    items.append({
+                        "title": entry.get("title", ""),
+                        "summary": clean_html(entry.get("summary", ""))[:250],
+                        "timestamp": entry.get("published", ""),
+                        "timestamp_display": format_timestamp(entry.get("published", "")),
+                        "link": entry.get("link", ""),
+                    })
+
+                error_msg = None if source_name == "Google News" else f"Primary source unavailable — showing {source_name}"
+                cache["reuters"] = {
+                    "items": items,
+                    "last_updated": datetime.now(),
+                    "error": error_msg,
+                }
+                # Reset backoff on success
+                _reuters_backoff_until = None
+                _reuters_backoff_minutes = 5
+                logger.info(f"Got {len(items)} items from {source_name}")
+                return
+
+    # All sources failed
     if not cache["reuters"]["items"]:
-        cache["reuters"]["error"] = "Could not fetch Reuters feed"
-    logger.warning("Failed to fetch Reuters Middle East")
+        cache["reuters"]["error"] = "Could not fetch news feed (all sources failed)"
+    logger.warning("All news sources failed for Middle East feed")
 
 
 # ============ TIMES OF ISRAEL FETCHER ============
@@ -1130,170 +1227,6 @@ def parse_toi_liveblog(soup, source_url: str = "") -> List[Dict]:
     return items
 
 
-# ============ POLYMARKET FETCHER ============
-
-def fetch_polymarket() -> None:
-    """Fetch Polymarket odds: Iran strike event (soonest deadline) + top trending market."""
-    logger.info("Fetching Polymarket odds...")
-
-    all_items = []
-
-    # === Primary: US/Israel strikes Iran event (auto-soonest deadline) ===
-    url = f"{POLYMARKET_API_URL}?slug={POLYMARKET_EVENT_SLUG}"
-    response = safe_request(url)
-    if response:
-        try:
-            data = response.json()
-            if data and len(data) > 0:
-                event = data[0]
-                markets = event.get("markets", [])
-
-                dated_markets = []
-                for market in markets:
-                    is_closed = bool(market.get("closed"))
-
-                    prices_str = market.get("outcomePrices", "[]")
-                    try:
-                        prices = json.loads(prices_str)
-                        yes_price = float(prices[0]) if prices else 0
-                        probability = int(yes_price * 100)
-                    except (json.JSONDecodeError, IndexError, ValueError):
-                        probability = 0
-
-                    # Skip 0%/100% only for active markets (resolved markets ARE 0/100)
-                    if not is_closed and (probability == 0 or probability == 100):
-                        continue
-
-                    title = market.get("groupItemTitle", "")
-                    question = market.get("question", "")
-
-                    # Parse date from groupItemTitle (e.g. "February 28")
-                    try:
-                        parsed = datetime.strptime(title, "%B %d")
-                        deadline = parsed.replace(year=datetime.now().year)
-                    except ValueError:
-                        deadline = datetime.max  # Unknown dates sort last
-
-                    entry = {
-                        "title": title,
-                        "question": question,
-                        "probability": probability,
-                        "volume": market.get("volumeNum", 0),
-                        "link": f"https://polymarket.com/event/{POLYMARKET_EVENT_SLUG}",
-                        "_deadline": deadline,
-                    }
-                    if is_closed:
-                        entry["resolved"] = True
-                        entry["outcome"] = "YES" if probability >= 50 else "NO"
-
-                    dated_markets.append(entry)
-
-                # Sort: active markets first (by deadline), then resolved (by deadline desc)
-                active = [m for m in dated_markets if not m.get("resolved")]
-                resolved = [m for m in dated_markets if m.get("resolved")]
-                active.sort(key=lambda x: x["_deadline"])
-                resolved.sort(key=lambda x: x["_deadline"], reverse=True)  # most recent first
-
-                # Keep all active + at most 1 most-recently-resolved (for context)
-                display_markets = active + resolved[:1]
-
-                for m in display_markets:
-                    m.pop("_deadline", None)
-                # Clean up remaining resolved items too
-                for m in resolved[1:]:
-                    m.pop("_deadline", None)
-
-                all_items.extend(display_markets)
-                n_active = len(active)
-                n_resolved = len(resolved)
-                logger.info(f"Got {n_active} active + {n_resolved} resolved markets from {POLYMARKET_EVENT_SLUG} (showing {len(display_markets)})")
-
-                # --- Shabbos snapshot logic ---
-                if active:
-                    try:
-                        soonest = active[0]
-                        times = get_shabbos_times()
-                        now = datetime.now(_tz)
-
-                        if now >= times["candle_lighting"] and now <= times["havdalah"]:
-                            # We're in (or past) candle lighting - save snapshot if needed
-                            existing = load_shabbos_snapshot()
-                            if not existing:
-                                save_shabbos_snapshot(soonest["probability"], soonest["title"])
-                        elif now > times["havdalah"]:
-                            clear_expired_snapshot()
-                    except Exception as e:
-                        logger.debug(f"Shabbos snapshot check failed: {e}")
-
-        except Exception as e:
-            logger.warning(f"Error parsing Polymarket event data: {e}")
-
-    # === Secondary: Top trending market on Polymarket (by 24h volume) ===
-    trending_url = f"{POLYMARKET_API_URL}?active=true&closed=false&order=volume24hr&ascending=false&limit=10"
-    response = safe_request(trending_url)
-    if response:
-        try:
-            data = response.json()
-            if data:
-                for event in data:
-                    slug = event.get("slug", "")
-                    if "strikes-iran" in slug or slug == POLYMARKET_EVENT_SLUG:
-                        continue
-
-                    title = event.get("title", "")
-                    markets = event.get("markets", [])
-                    if not markets:
-                        continue
-
-                    # Find highest-volume active sub-market
-                    best_market = None
-                    best_vol = 0
-                    for market in markets:
-                        if market.get("closed"):
-                            continue
-                        prices_str = market.get("outcomePrices", "[]")
-                        try:
-                            prices = json.loads(prices_str)
-                            yes_price = float(prices[0]) if prices else 0
-                            prob = int(yes_price * 100)
-                        except (json.JSONDecodeError, IndexError, ValueError):
-                            prob = 0
-                        if 0 < prob < 100:
-                            vol = market.get("volumeNum", 0)
-                            if vol > best_vol:
-                                best_market = (market, prob)
-                                best_vol = vol
-
-                    if not best_market:
-                        continue
-
-                    market, probability = best_market
-                    all_items.append({
-                        "title": f"TRENDING: {title}",
-                        "question": market.get("question", title),
-                        "probability": probability,
-                        "volume": market.get("volumeNum", 0),
-                        "link": f"https://polymarket.com/event/{slug}",
-                        "is_trending": True,
-                    })
-                    logger.info(f"Got trending market: {title}")
-                    break  # Only take the #1 trending market
-        except Exception as e:
-            logger.warning(f"Error fetching trending Polymarket data: {e}")
-
-    if all_items:
-        cache["polymarket"] = {
-            "items": all_items,
-            "last_updated": datetime.now(),
-            "error": None,
-            "event_title": "Iran Strike Markets",
-        }
-        logger.info(f"Got {len(all_items)} total Polymarket markets")
-    elif not cache["polymarket"]["items"]:
-        cache["polymarket"]["error"] = "Could not fetch Polymarket data"
-        logger.warning("Failed to fetch Polymarket")
-
-
 # ============ AI SUMMARY FETCHER ============
 
 
@@ -1385,7 +1318,11 @@ def _build_feed_digest() -> str:
 
 
 def _generate_morning_summary(api_key: str) -> None:
-    """Generate comprehensive morning summary covering overnight data (Opus)."""
+    """Generate comprehensive morning summary covering overnight data (Opus).
+
+    Retries once on transient API errors (connection, server) with a 30s delay.
+    Auth errors fail immediately (not retry-able without human intervention).
+    """
     logger.info("Generating morning AI summary (Opus)...")
 
     feed_digest = _build_feed_digest()
@@ -1393,53 +1330,75 @@ def _generate_morning_summary(api_key: str) -> None:
         cache["ai_summary"]["error"] = "No feed data available to summarize"
         return
 
-    try:
-        client = anthropic.Anthropic(api_key=api_key)
-        message = client.messages.create(
-            model=AI_SUMMARY_MORNING_MODEL,
-            max_tokens=AI_SUMMARY_MAX_TOKENS,
-            system=AI_SUMMARY_MORNING_PROMPT,
-            messages=[{
-                "role": "user",
-                "content": f"Here is the current feed data. Summarize overnight developments:\n\n{feed_digest}",
-            }],
-        )
+    max_retries = 2
+    for attempt in range(max_retries):
+        try:
+            client = anthropic.Anthropic(api_key=api_key)
+            message = client.messages.create(
+                model=AI_SUMMARY_MORNING_MODEL,
+                max_tokens=AI_SUMMARY_MAX_TOKENS,
+                system=AI_SUMMARY_MORNING_PROMPT,
+                messages=[{
+                    "role": "user",
+                    "content": f"Here is the current feed data. Summarize overnight developments:\n\n{feed_digest}",
+                }],
+            )
 
-        summary_text = message.content[0].text.strip()
-        gen_time = datetime.now()
-        gen_et = datetime.now(ZoneInfo("America/New_York"))
+            summary_text = message.content[0].text.strip()
+            gen_time = datetime.now()
+            gen_et = datetime.now(ZoneInfo("America/New_York"))
 
-        morning_entry = {
-            "type": "morning",
-            "text": summary_text,
-            "generated_at": gen_time.isoformat(),
-            "generated_at_display": gen_et.strftime("%a %-I:%M %p ET"),
-            "hour_label": "Morning Summary",
-            "bullets": [],
-        }
+            morning_entry = {
+                "type": "morning",
+                "text": summary_text,
+                "generated_at": gen_time.isoformat(),
+                "generated_at_display": gen_et.strftime("%a %-I:%M %p ET"),
+                "hour_label": "Morning Summary",
+                "bullets": [],
+            }
 
-        # Store as morning summary (displayed specially in template)
-        cache["ai_summary"]["morning_summary"] = morning_entry
+            # Store as morning summary (displayed specially in template)
+            cache["ai_summary"]["morning_summary"] = morning_entry
 
-        # Also prepend to summaries list for history
-        summaries = cache["ai_summary"].get("summaries", [])
-        summaries.insert(0, morning_entry)
-        cache["ai_summary"]["summaries"] = summaries[:24]
+            # Also prepend to summaries list for history
+            summaries = cache["ai_summary"].get("summaries", [])
+            summaries.insert(0, morning_entry)
+            cache["ai_summary"]["summaries"] = summaries[:24]
 
-        cache["ai_summary"]["items"] = []
-        cache["ai_summary"]["last_updated"] = gen_time
-        cache["ai_summary"]["error"] = None
+            cache["ai_summary"]["items"] = []
+            cache["ai_summary"]["last_updated"] = gen_time
+            cache["ai_summary"]["error"] = None
 
-        logger.info("Morning AI summary generated (Opus)")
+            logger.info("Morning AI summary generated (Opus)")
+            return  # Success
 
-    except Exception as e:
-        logger.warning(f"Morning AI summary error: {e}")
-        if not cache["ai_summary"].get("summaries") and not cache["ai_summary"]["items"]:
-            cache["ai_summary"]["error"] = f"Summary unavailable: {str(e)[:80]}"
+        except anthropic.AuthenticationError as e:
+            logger.error(f"AI summary: authentication error — check API key: {e}")
+            cache["ai_summary"]["error"] = "API key invalid — check .env file"
+            return  # Don't retry auth errors
+
+        except (anthropic.APIConnectionError, anthropic.InternalServerError, anthropic.RateLimitError) as e:
+            if attempt < max_retries - 1:
+                logger.warning(f"Morning AI summary: transient error (attempt {attempt + 1}), retrying in 30s: {e}")
+                time.sleep(30)
+            else:
+                logger.warning(f"Morning AI summary error after {max_retries} attempts: {e}")
+                if not cache["ai_summary"].get("summaries") and not cache["ai_summary"]["items"]:
+                    cache["ai_summary"]["error"] = f"Summary unavailable: {str(e)[:80]}"
+
+        except Exception as e:
+            logger.warning(f"Morning AI summary error: {e}")
+            if not cache["ai_summary"].get("summaries") and not cache["ai_summary"]["items"]:
+                cache["ai_summary"]["error"] = f"Summary unavailable: {str(e)[:80]}"
+            return  # Unknown error — don't retry
 
 
 def _generate_regular_summary(api_key: str) -> None:
-    """Generate 2-hour summary using Haiku."""
+    """Generate 2-hour summary using Haiku.
+
+    Retries once on transient API errors (connection, server) with a 30s delay.
+    Auth errors fail immediately (not retry-able without human intervention).
+    """
     logger.info("Generating 2-hour AI summary (Haiku)...")
 
     feed_digest = _build_feed_digest()
@@ -1447,48 +1406,66 @@ def _generate_regular_summary(api_key: str) -> None:
         cache["ai_summary"]["error"] = "No feed data available to summarize"
         return
 
-    try:
-        client = anthropic.Anthropic(api_key=api_key)
-        message = client.messages.create(
-            model=AI_SUMMARY_REGULAR_MODEL,
-            max_tokens=AI_SUMMARY_MAX_TOKENS,
-            system=AI_SUMMARY_REGULAR_PROMPT,
-            messages=[{
-                "role": "user",
-                "content": f"Here are the current feed items. Summarize the key developments:\n\n{feed_digest}",
-            }],
-        )
+    max_retries = 2
+    for attempt in range(max_retries):
+        try:
+            client = anthropic.Anthropic(api_key=api_key)
+            message = client.messages.create(
+                model=AI_SUMMARY_REGULAR_MODEL,
+                max_tokens=AI_SUMMARY_MAX_TOKENS,
+                system=AI_SUMMARY_REGULAR_PROMPT,
+                messages=[{
+                    "role": "user",
+                    "content": f"Here are the current feed items. Summarize the key developments:\n\n{feed_digest}",
+                }],
+            )
 
-        summary_text = message.content[0].text
-        bullets = _parse_ai_bullets(summary_text)
+            summary_text = message.content[0].text
+            bullets = _parse_ai_bullets(summary_text)
 
-        gen_time = datetime.now()
-        gen_et = datetime.now(ZoneInfo("America/New_York"))
-        hour_end = gen_et.replace(minute=0, second=0, microsecond=0)
-        hour_start = hour_end - timedelta(hours=2)
+            gen_time = datetime.now()
+            gen_et = datetime.now(ZoneInfo("America/New_York"))
+            hour_end = gen_et.replace(minute=0, second=0, microsecond=0)
+            hour_start = hour_end - timedelta(hours=2)
 
-        summary_entry = {
-            "type": "regular",
-            "generated_at": gen_time.isoformat(),
-            "generated_at_display": gen_et.strftime("%a %-I:%M %p ET"),
-            "hour_label": f"{hour_start.strftime('%-I:%M')}-{hour_end.strftime('%-I:%M %p')} ET",
-            "bullets": bullets,
-        }
+            summary_entry = {
+                "type": "regular",
+                "generated_at": gen_time.isoformat(),
+                "generated_at_display": gen_et.strftime("%a %-I:%M %p ET"),
+                "hour_label": f"{hour_start.strftime('%-I:%M')}-{hour_end.strftime('%-I:%M %p')} ET",
+                "bullets": bullets,
+            }
 
-        summaries = cache["ai_summary"].get("summaries", [])
-        summaries.insert(0, summary_entry)
-        cache["ai_summary"]["summaries"] = summaries[:24]
+            summaries = cache["ai_summary"].get("summaries", [])
+            summaries.insert(0, summary_entry)
+            cache["ai_summary"]["summaries"] = summaries[:24]
 
-        cache["ai_summary"]["items"] = bullets
-        cache["ai_summary"]["last_updated"] = gen_time
-        cache["ai_summary"]["error"] = None
+            cache["ai_summary"]["items"] = bullets
+            cache["ai_summary"]["last_updated"] = gen_time
+            cache["ai_summary"]["error"] = None
 
-        logger.info(f"2-hour AI summary: {len(bullets)} bullets, {len(summaries)} total in history")
+            logger.info(f"2-hour AI summary: {len(bullets)} bullets, {len(summaries)} total in history")
+            return  # Success
 
-    except Exception as e:
-        logger.warning(f"AI summary error: {e}")
-        if not cache["ai_summary"].get("summaries") and not cache["ai_summary"]["items"]:
-            cache["ai_summary"]["error"] = f"Summary unavailable: {str(e)[:80]}"
+        except anthropic.AuthenticationError as e:
+            logger.error(f"AI summary: authentication error — check API key: {e}")
+            cache["ai_summary"]["error"] = "API key invalid — check .env file"
+            return  # Don't retry auth errors
+
+        except (anthropic.APIConnectionError, anthropic.InternalServerError, anthropic.RateLimitError) as e:
+            if attempt < max_retries - 1:
+                logger.warning(f"AI summary: transient error (attempt {attempt + 1}), retrying in 30s: {e}")
+                time.sleep(30)
+            else:
+                logger.warning(f"AI summary error after {max_retries} attempts: {e}")
+                if not cache["ai_summary"].get("summaries") and not cache["ai_summary"]["items"]:
+                    cache["ai_summary"]["error"] = f"Summary unavailable: {str(e)[:80]}"
+
+        except Exception as e:
+            logger.warning(f"AI summary error: {e}")
+            if not cache["ai_summary"].get("summaries") and not cache["ai_summary"]["items"]:
+                cache["ai_summary"]["error"] = f"Summary unavailable: {str(e)[:80]}"
+            return  # Unknown error — don't retry
 
 
 def fetch_ai_summary(force: bool = False) -> None:
@@ -1531,6 +1508,9 @@ def fetch_ai_summary(force: bool = False) -> None:
     # Quiet hours: 1 AM - 7 AM — do nothing (unless forced)
     if not force and current_hour in AI_SUMMARY_QUIET_HOURS:
         logger.info(f"AI summary: quiet hours ({current_hour}:00 ET), skipping")
+        # Set an informational message so the UI explains the pause
+        if not cache["ai_summary"].get("summaries"):
+            cache["ai_summary"]["error"] = "Quiet hours (1\u20137 AM ET) \u2014 next update at 8 AM"
         return
 
     # Determine summary type
@@ -1555,10 +1535,9 @@ def update_all_feeds() -> None:
         "trump": fetch_trump,
         "reuters": fetch_reuters,
         "toi": fetch_toi,
-        "polymarket": fetch_polymarket,
     }
 
-    with ThreadPoolExecutor(max_workers=5) as executor:
+    with ThreadPoolExecutor(max_workers=4) as executor:
         futures = {
             executor.submit(fn): name
             for name, fn in fetchers.items()
@@ -1587,42 +1566,17 @@ def dashboard():
     global _last_dashboard_view
     _last_dashboard_view = datetime.now()
 
-    # Compute Shabbos delta for soonest market
-    shabbos_delta = None
     shabbos_times = None
     try:
         shabbos_times = get_shabbos_times()
-        snapshot = load_shabbos_snapshot()
-        if snapshot and cache["polymarket"]["items"]:
-            # Match by market title (not position — markets may resolve/shuffle)
-            matched = None
-            for item in cache["polymarket"]["items"]:
-                if not item.get("is_trending") and item.get("title") == snapshot.get("market_title"):
-                    matched = item
-                    break
-            # Fall back to first non-trending if snapshot market not found
-            if not matched:
-                for item in cache["polymarket"]["items"]:
-                    if not item.get("is_trending"):
-                        matched = item
-                        break
-            if matched:
-                shabbos_delta = {
-                    "current": matched["probability"],
-                    "at_start": snapshot["probability"],
-                    "delta": matched["probability"] - snapshot["probability"],
-                    "market_title": snapshot["market_title"],
-                    "resolved": matched.get("resolved", False),
-                }
     except Exception as e:
-        logger.debug(f"Shabbos delta computation failed: {e}")
+        logger.debug(f"Shabbos times computation failed: {e}")
 
     return render_template(
         "index.html",
         cache=cache,
         generated_at=datetime.now(),
         refresh_interval=REFRESH_INTERVAL,
-        shabbos_delta=shabbos_delta,
         shabbos_times=shabbos_times,
         ai_summary_enabled=ai_summary_enabled,
         has_anthropic=HAS_ANTHROPIC,
@@ -1697,34 +1651,43 @@ def refresh_ai():
 def _watchdog_loop():
     """Background watchdog that detects stale feeds and forces recovery.
 
-    Runs every 2x the refresh interval. If no feed has been updated in
-    3x the refresh interval, it means the scheduler has silently died —
-    so the watchdog forces a manual update cycle.
+    Runs every 2x the refresh interval. Checks EACH feed individually
+    (not just the freshest one) so a single healthy feed can't mask
+    dead ones. The ai_summary feed is excluded since it updates on
+    a schedule, not every interval.
     """
     stale_threshold = REFRESH_INTERVAL * 3  # seconds
+    WATCHDOG_EXCLUDED = {"ai_summary"}  # Schedule-based, not interval-based
     while True:
         time.sleep(REFRESH_INTERVAL * 2)
         try:
             now = datetime.now()
-            timestamps = [
-                data["last_updated"]
-                for data in cache.values()
-                if data["last_updated"]
-            ]
-            if not timestamps:
-                logger.warning("WATCHDOG: No feeds have ever been updated, forcing fetch")
-                update_all_feeds()
-                continue
-            newest = max(timestamps)
-            age = (now - newest).total_seconds()
-            if age > stale_threshold:
+            stale_feeds = []
+            any_updated = False
+
+            for feed_name, data in cache.items():
+                if feed_name in WATCHDOG_EXCLUDED:
+                    continue
+                lu = data["last_updated"]
+                if lu is None:
+                    stale_feeds.append(f"{feed_name}(never)")
+                else:
+                    age = (now - lu).total_seconds()
+                    if age > stale_threshold:
+                        stale_feeds.append(f"{feed_name}({age/60:.0f}m)")
+                    else:
+                        any_updated = True
+
+            if stale_feeds:
                 logger.error(
-                    f"WATCHDOG: Feeds are {age/60:.0f}m stale "
-                    f"(threshold: {stale_threshold/60:.0f}m). Forcing update."
+                    f"WATCHDOG: Stale feeds detected: {', '.join(stale_feeds)}. Forcing update."
                 )
                 update_all_feeds()
+            elif not any_updated:
+                logger.warning("WATCHDOG: No feeds have ever been updated, forcing fetch")
+                update_all_feeds()
             else:
-                logger.debug(f"WATCHDOG: Feeds healthy, newest is {age/60:.1f}m old")
+                logger.debug("WATCHDOG: All monitored feeds healthy")
         except Exception as e:
             logger.error(f"WATCHDOG: Error in watchdog loop: {e}")
 
