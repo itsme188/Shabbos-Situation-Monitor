@@ -32,7 +32,8 @@
 - ~~**Cache race condition**~~ — RESOLVED by zombie fix: only one process can run, so no concurrent writers.
 - ~~**TOI permanent 429**~~ — FIXED: Exponential backoff (5→10→20→30min cap) on 429 responses. `RateLimitError` in `safe_request(raise_on_429=True)` lets TOI fetcher skip cycles when rate-limited. Backoff resets on successful fetch.
 - ~~**OSINT degraded to 3/13 accounts**~~ — RESOLVED by zombie fix: single instance stays within TwStalker's Semaphore(2) rate limit.
-- **Trump raw URLs**: Some Truth Social posts still show opaque `truthsocial.com/...` URLs instead of text content.
+- ~~**Trump raw URLs**: Some Truth Social posts still show opaque `truthsocial.com/...` URLs instead of text content.~~ — FIXED: `extract_text_with_links()` strips bare truthsocial.com URLs via regex. Empty posts filtered by existing guard.
+- ~~**TOI liveblog showing 2020 content**~~ — FIXED: Base `/liveblog/` URL is a frozen 2020 COVID archive. Date-specific URLs now tried first, base URL is last resort.
 - ~~**AI summary paused/confused**~~ — RESOLVED by zombie fix: only one scheduler instance runs.
 - ~~**Logs lost**~~ — RESOLVED by zombie fix: no more crash-loop flood generating 35K lines in 10min.
 - ~~**TOI clears cache on failure**~~ — FIXED: `fetch_toi()` now preserves last-good items with "Showing cached content (fetch failed)" error instead of clearing to empty.
@@ -75,4 +76,6 @@
 - ~~**start.sh needs a PID/lock guard**~~ — DONE: Port check at startup + inside crash-loop
 - ~~**server.py must check port BEFORE doing work**~~ — DONE: Socket bind test in `__main__` before any fetching
 - ~~**Failed fetches should preserve last-good cache**~~ — DONE for TOI: preserves old items on failure
-- **Rate-limit backoff pattern**: `RateLimitError` exception + `safe_request(raise_on_429=True)` + per-source `_backoff_until`/`_backoff_minutes` globals. Exponential: doubles on each 429, resets on success, caps at 30min. Currently only on TOI; can be applied to other sources.
+- **Rate-limit backoff pattern**: `RateLimitError` exception + `safe_request(raise_on_429=True)` + per-source `_backoff_until`/`_backoff_minutes` globals. Exponential: doubles on each 429, resets on success, caps at 30min. Now on TOI and xcancel.
+- **TOI liveblog URL ordering**: Date-specific URLs must be tried before the base `/liveblog/` URL, which points to a frozen 2020 archive. The structural fallback is too good — it finds entries on stale pages, so URL priority matters.
+- **Always test with live data**: Import validation and syntax checks don't catch data-quality bugs like stale URLs returning old content. Run the actual fetcher and inspect the output.
