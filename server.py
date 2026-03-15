@@ -212,6 +212,8 @@ def load_cache_from_disk() -> bool:
                 loaded_count += 1
         # Restore backoff state so crash-restarts don't re-hammer rate-limited services
         _restore_backoff_state(data)
+        # Prune AI summaries from previous days
+        _prune_old_summaries()
         logger.info(f"Loaded {loaded_count} feeds from disk cache ({age/60:.1f}m old)")
         return loaded_count > 0
     except (FileNotFoundError, json.JSONDecodeError, KeyError, ValueError) as e:
@@ -370,21 +372,35 @@ def _is_nitter_error_content(text: str) -> bool:
 
 # ============ UTILITY FUNCTIONS ============
 
-def format_timestamp(timestamp_str: str) -> str:
-    """Convert various timestamp formats to readable display."""
+def format_timestamp(timestamp_str: str, source_tz: str = None) -> str:
+    """Convert various timestamp formats to readable display in ET.
+
+    Args:
+        timestamp_str: ISO 8601, RSS (RFC 2822), or other timestamp string.
+        source_tz: If the parsed datetime is naive (no offset), assume this
+                   timezone. E.g. "Asia/Jerusalem" for TOI liveblog.
+    """
     if not timestamp_str:
         return ""
     try:
         # Try parsing ISO format
         dt = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
-        return dt.strftime('%a %-I:%M %p')
     except (ValueError, TypeError):
         try:
             # Try RSS format (parsedate_to_datetime imported at module level)
             dt = parsedate_to_datetime(timestamp_str)
-            return dt.strftime('%a %-I:%M %p')
         except (ValueError, TypeError):
             return timestamp_str[:16] if timestamp_str else ""
+
+    # Localize naive datetimes if source timezone is known
+    if dt.tzinfo is None and source_tz:
+        dt = dt.replace(tzinfo=ZoneInfo(source_tz))
+
+    # Convert timezone-aware datetimes to ET for display
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(ZoneInfo("America/New_York"))
+
+    return dt.strftime('%a %-I:%M %p')
 
 
 def clean_html(html_text: str) -> str:
@@ -1212,11 +1228,12 @@ def parse_toi_liveblog(soup, source_url: str = "") -> List[Dict]:
             title_elem = entry.select_one("h2, h3, h4, .entry-title, .headline")
 
             if content_elem or title_elem:
+                raw_dt = time_elem.get("datetime", "") if time_elem else ""
                 items.append({
                     "title": title_elem.get_text(strip=True) if title_elem else "",
                     "summary": content_elem.get_text(strip=True)[:250] if content_elem else "",
-                    "timestamp": time_elem.get("datetime", "") if time_elem else "",
-                    "timestamp_display": time_elem.get_text(strip=True) if time_elem else "LIVE",
+                    "timestamp": raw_dt,
+                    "timestamp_display": format_timestamp(raw_dt, source_tz="Asia/Jerusalem") if raw_dt else "LIVE",
                     "link": source_url or TOI_LIVEBLOG_URL,
                     "source": "liveblog",
                 })
@@ -1278,6 +1295,47 @@ def _parse_ai_bullets(summary_text: str) -> List[Dict]:
 
     bullets.sort(key=lambda b: _sort_key_for_time(b.get("timestamp_display", "99:99")))
     return bullets
+
+
+def _prune_old_summaries() -> None:
+    """Remove AI summaries not from today (ET timezone).
+
+    Called at startup, before generation, and on dashboard load to ensure
+    stale entries from previous days never accumulate or display.
+    """
+    today_et = datetime.now(ZoneInfo("America/New_York")).date()
+
+    summaries = cache["ai_summary"].get("summaries", [])
+    if summaries:
+        filtered = []
+        for entry in summaries:
+            try:
+                gen_dt = datetime.fromisoformat(entry.get("generated_at", ""))
+                # generated_at is naive server-local time (ET)
+                gen_date = gen_dt.date()
+                if gen_date == today_et:
+                    filtered.append(entry)
+            except (ValueError, TypeError):
+                filtered.append(entry)  # Keep unparseable entries (defensive)
+
+        if len(filtered) < len(summaries):
+            logger.info(f"Pruned {len(summaries) - len(filtered)} old AI summaries (keeping {len(filtered)} from today)")
+            cache["ai_summary"]["summaries"] = filtered
+
+    # Clear morning summary if from a previous day
+    morning = cache["ai_summary"].get("morning_summary")
+    if morning:
+        try:
+            gen_dt = datetime.fromisoformat(morning.get("generated_at", ""))
+            if gen_dt.date() != today_et:
+                cache["ai_summary"]["morning_summary"] = None
+                logger.info(f"Cleared stale morning summary from {gen_dt.date()}")
+        except (ValueError, TypeError):
+            pass
+
+    # Clear items array if no summaries remain for today
+    if not cache["ai_summary"].get("summaries"):
+        cache["ai_summary"]["items"] = []
 
 
 def _build_feed_digest() -> str:
@@ -1363,7 +1421,7 @@ def _generate_morning_summary(api_key: str) -> None:
             # Also prepend to summaries list for history
             summaries = cache["ai_summary"].get("summaries", [])
             summaries.insert(0, morning_entry)
-            cache["ai_summary"]["summaries"] = summaries[:24]
+            cache["ai_summary"]["summaries"] = summaries[:14]
 
             cache["ai_summary"]["items"] = []
             cache["ai_summary"]["last_updated"] = gen_time
@@ -1438,7 +1496,7 @@ def _generate_regular_summary(api_key: str) -> None:
 
             summaries = cache["ai_summary"].get("summaries", [])
             summaries.insert(0, summary_entry)
-            cache["ai_summary"]["summaries"] = summaries[:24]
+            cache["ai_summary"]["summaries"] = summaries[:14]
 
             cache["ai_summary"]["items"] = bullets
             cache["ai_summary"]["last_updated"] = gen_time
@@ -1500,6 +1558,9 @@ def fetch_ai_summary(force: bool = False) -> None:
         cache["ai_summary"]["error"] = "ANTHROPIC_API_KEY not set — add key to .env file"
         logger.warning("AI summary skipped: ANTHROPIC_API_KEY not set")
         return
+
+    # Prune AI summaries from previous days before generating new ones
+    _prune_old_summaries()
 
     # Determine current hour in ET
     now_et = datetime.now(ZoneInfo("America/New_York"))
@@ -1565,6 +1626,7 @@ def dashboard():
     """Main dashboard page."""
     global _last_dashboard_view
     _last_dashboard_view = datetime.now()
+    _prune_old_summaries()
 
     shabbos_times = None
     try:

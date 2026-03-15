@@ -3,8 +3,8 @@
   "configurations": [
     {
       "name": "shabbos-monitor",
-      "runtimeExecutable": "bash",
-      "runtimeArgs": ["./start.sh"],
+      "runtimeExecutable": "/Users/Yitzi/Desktop/shabbos situation monitor/venv/bin/python3",
+      "runtimeArgs": ["server.py"],
       "port": 8080
     }
   ]

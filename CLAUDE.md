@@ -89,3 +89,6 @@
 - **Rate-limit backoff pattern**: `RateLimitError` exception + `safe_request(raise_on_429=True)` + per-source `_backoff_until`/`_backoff_minutes` globals. Exponential: doubles on each 429, resets on success, caps at 30min. Now on TOI, xcancel, Trump, and Reuters. Backoff state persists in `feed_cache.json` across restarts.
 - **TOI liveblog URL ordering**: Date-specific URLs must be tried before the base `/liveblog/` URL, which points to a frozen 2020 archive. The structural fallback is too good — it finds entries on stale pages, so URL priority matters.
 - **Always test with live data**: Import validation and syntax checks don't catch data-quality bugs like stale URLs returning old content. Run the actual fetcher and inspect the output.
+- **Polymarket Gamma API**: Public REST, no auth. `events?slug=...` returns array of events with nested `markets[]`. Each market has `outcomePrices` (JSON string `'["0.40","0.60"]'`, index 0 = Yes probability). Multi-outcome events (e.g., "by March 31" / "by Dec 31") need sub-market slug targeting.
+- **Metaculus API requires auth**: Returns 403 without API token. Free account needed. Not used currently.
+- **Pending branch**: `feature/prediction-markets-ai-summary` — prediction market odds in AI summaries + candle-lighting Friday summary. Not yet deployed.
