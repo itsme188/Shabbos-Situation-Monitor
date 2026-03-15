@@ -13,7 +13,7 @@
 - `start.sh` has auto-restart loop, venv management, graceful SIGINT handling, **port-check guard** against duplicate instances
 
 ## Key Files
-- `server.py` — main app (~1020 lines), routes, scheduler, all feed fetchers
+- `server.py` — main app (~1840 lines), routes, scheduler, all feed fetchers
 - `config.py` — HOST, PORT, REFRESH_INTERVAL, feed URLs, OSINT account lists (11 accounts)
 - `start.sh` — production launcher with crash recovery
 - `launcher.applescript` — macOS one-click startup (health-polls, reuses Safari tabs, error dialog)
@@ -38,6 +38,12 @@
 - ~~**Logs lost**~~ — RESOLVED by zombie fix: no more crash-loop flood generating 35K lines in 10min.
 - ~~**TOI clears cache on failure**~~ — FIXED: `fetch_toi()` now preserves last-good items with "Showing cached content (fetch failed)" error instead of clearing to empty.
 
+## Known Issues (from third Shabbos run, Mar 14 2026 — grade: B-)
+- ~~**Feed timestamps in UTC, not ET**: TOI RSS, Trump, Reuters, BlueSky all displayed UTC times (4+ hours ahead of ET). User sees "Sat 11:08 PM" when it's 7:08 PM ET.~~ — FIXED: `format_timestamp()` now converts all timezone-aware datetimes to ET via `.astimezone()`. Optional `source_tz` param for naive datetimes (TOI liveblog → "Asia/Jerusalem").
+- ~~**AI summaries showed stale content from previous days**: 21 entries spanning 6 days (Sun–Sat) accumulated in cache. Monday's 8:05 AM morning summary visible on Saturday. No date filtering existed.~~ — FIXED: `_prune_old_summaries()` removes entries not from today (ET). Called at cache load, before generation, and on dashboard render. Summary cap reduced 24→14.
+- AI summaries may still reference old events when today's news articles discuss earlier events — LLM summarizes those references. Mitigated by feed digest timestamps now being in ET (consistent with "Current time" header sent to LLM).
+- Core value delivered: morning summary was good, big stories communicated
+
 ## Feed Architecture
 - Each feed has: fetcher function, cache entry, error state, last_updated timestamp
 - `update_all_feeds()` runs all fetchers concurrently via ThreadPoolExecutor
@@ -54,7 +60,8 @@
 - AI summary retries once on transient API errors (529, connection, rate limit); auth errors fail immediately
 
 ## Timestamps
-- All timestamps use `format_timestamp()` → `strftime('%a %-I:%M %p')` → "Fri 2:30 PM"
+- All timestamps use `format_timestamp()` → converts to ET via `.astimezone()` → `strftime('%a %-I:%M %p')` → "Fri 2:30 PM"
+- `format_timestamp(ts, source_tz=None)`: optional `source_tz` for naive datetimes (e.g. TOI liveblog uses "Asia/Jerusalem")
 - `%-I` is macOS/POSIX only (no leading zero on 12-hour time)
 - Candle lighting time in header status bar.
 
