@@ -84,7 +84,8 @@ from config import (
     AI_SUMMARY_MORNING_MODEL, AI_SUMMARY_REGULAR_MODEL,
     AI_SUMMARY_MORNING_PROMPT, AI_SUMMARY_REGULAR_PROMPT,
     AI_SUMMARY_RETENTION_DAYS, AI_SUMMARY_MAX_ENTRIES, AI_INACTIVITY_TIMEOUT,
-    THINK_TANK_FEEDS,
+    THINK_TANK_FEEDS, THINK_TANK_MAX_AGE_HOURS,
+    THINK_TANK_SUMMARIZE, THINK_TANK_SUMMARY_MAX_NEW,
     YOM_TOV_END,
 )
 
@@ -1255,13 +1256,131 @@ def parse_toi_liveblog(soup, source_url: str = "") -> List[Dict]:
 
 # ============ THINK TANK FETCHER ============
 
+# Cache for AI-generated article summaries (keyed by article URL)
+# Persists in memory across refresh cycles so we don't re-summarize
+_article_summary_cache: Dict[str, str] = {}
+
+
+def _fetch_article_text(url: str) -> str:
+    """Fetch an article URL and extract readable text content."""
+    try:
+        response = safe_request(url)
+        if not response:
+            return ""
+        soup = BeautifulSoup(response.content, "html.parser")
+        # Remove nav, header, footer, script, style elements
+        for tag in soup.find_all(["nav", "header", "footer", "script", "style", "aside", "form"]):
+            tag.decompose()
+        # Try common article body selectors
+        article = (
+            soup.find("article")
+            or soup.find("div", class_=re.compile(r"article|post|entry|content", re.I))
+            or soup.find("main")
+            or soup.body
+        )
+        if not article:
+            return ""
+        text = article.get_text(separator="\n", strip=True)
+        # Take first ~3000 chars (enough for a good summary, not too much for the LLM)
+        return text[:3000]
+    except Exception as e:
+        logger.debug(f"Failed to fetch article text from {url}: {e}")
+        return ""
+
+
+def _summarize_article(title: str, text: str, api_key: str) -> str:
+    """Use Haiku to generate a 1-2 paragraph summary of an article."""
+    if not text or len(text) < 100:
+        return ""
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        message = client.messages.create(
+            model=AI_SUMMARY_REGULAR_MODEL,  # Haiku — fast and cheap
+            max_tokens=300,
+            system="You are a concise analyst. Summarize the following article in 1-2 short paragraphs. Focus on the key argument, findings, or implications. No preamble.",
+            messages=[{"role": "user", "content": f"Article: {title}\n\n{text}"}],
+        )
+        text = message.content[0].text.strip()
+        # Strip markdown headers the model sometimes adds
+        text = re.sub(r'^#+\s*summary\s*\n*', '', text, flags=re.IGNORECASE).strip()
+        return text
+    except Exception as e:
+        logger.warning(f"Article summarization failed for '{title[:50]}': {e}")
+        return ""
+
+
+def _scrape_think_tank_page(feed_def: dict) -> list:
+    """Scrape a think tank website for article links and titles."""
+    items = []
+    try:
+        response = safe_request(feed_def["url"])
+        if not response:
+            return items
+        soup = BeautifulSoup(response.content, "html.parser")
+        link_pattern = feed_def.get("link_pattern", "/")
+        base_url = feed_def.get("base_url", "")
+        seen_urls = set()
+
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            title = a.get_text().strip()
+            if not title or len(title) < 15:
+                continue
+            if link_pattern not in href:
+                continue
+            if not href.startswith("http"):
+                href = base_url + href
+            if href in seen_urls:
+                continue
+            seen_urls.add(href)
+            items.append({
+                "title": title,
+                "link": href,
+                "source": feed_def["name"],
+            })
+            if len(items) >= feed_def["max_items"]:
+                break
+    except Exception as e:
+        logger.warning(f"Scrape failed for {feed_def['name']}: {e}")
+    return items
+
+
 def fetch_think_tanks() -> None:
-    """Fetch strategic analysis articles from think tank RSS feeds (FDD, CSIS, ISW)."""
+    """Fetch strategic analysis articles from think tanks (FDD, CSIS, ISW).
+
+    Supports two source types:
+    - "rss": standard RSS feed (FDD — has content:encoded with full article body)
+    - "scrape": HTML scraping of publications pages (CSIS, ISW — direct article links)
+
+    For each article: visits the article URL to extract full text, then uses
+    Haiku to generate a 1-2 paragraph summary. Summaries are cached by URL.
+    """
     logger.info("Fetching think tank articles...")
     all_items = []
     errors = []
+    now = datetime.now(ZoneInfo("UTC"))
+    max_age = timedelta(hours=THINK_TANK_MAX_AGE_HOURS)
 
     for feed_def in THINK_TANK_FEEDS:
+        if feed_def["type"] == "scrape":
+            # Direct website scraping (CSIS, ISW)
+            scraped = _scrape_think_tank_page(feed_def)
+            if not scraped:
+                errors.append(f"{feed_def['name']}: no articles found")
+            for item in scraped:
+                all_items.append({
+                    "title": item["title"],
+                    "summary": "",
+                    "raw_content": "",
+                    "timestamp": "",  # Scraped pages don't have timestamps
+                    "timestamp_display": "",
+                    "link": item["link"],
+                    "source": item["source"],
+                    "author": "",
+                })
+            continue
+
+        # RSS feed (FDD)
         try:
             response = safe_request(feed_def["url"], raise_on_429=True)
         except RateLimitError:
@@ -1279,46 +1398,82 @@ def fetch_think_tanks() -> None:
             continue
 
         for entry in feed.entries[:feed_def["max_items"]]:
-            # For direct RSS (FDD): use content:encoded if available (richer than summary)
-            content = ""
-            if feed_def["type"] == "rss" and entry.get("content"):
-                content = clean_html(entry["content"][0].get("value", ""))[:500]
-            elif entry.get("summary"):
-                content = clean_html(entry["summary"])[:300]
+            # Parse timestamp and filter by recency
+            published = entry.get("published", "")
+            try:
+                from email.utils import parsedate_to_datetime
+                pub_dt = parsedate_to_datetime(published)
+                if pub_dt.tzinfo is None:
+                    pub_dt = pub_dt.replace(tzinfo=ZoneInfo("UTC"))
+                if (now - pub_dt) > max_age:
+                    continue
+            except (ValueError, TypeError):
+                pass
 
-            # Extract source from Google News title format: "Title - Source"
             title = entry.get("title", "")
-            source = feed_def["name"]
-            if feed_def["type"] == "google_news" and " - " in title:
-                title, source = title.rsplit(" - ", 1)
-
-            ts_display = format_timestamp(entry.get("published", ""))
+            raw_content = ""
+            if entry.get("content"):
+                raw_content = clean_html(entry["content"][0].get("value", ""))[:3000]
 
             all_items.append({
                 "title": title.strip(),
-                "summary": content,
-                "timestamp": entry.get("published", ""),
-                "timestamp_display": ts_display,
+                "summary": "",
+                "raw_content": raw_content,
+                "timestamp": published,
+                "timestamp_display": format_timestamp(published),
                 "link": entry.get("link", ""),
-                "source": source.strip(),
+                "source": feed_def["name"],
                 "author": entry.get("author", entry.get("dc_creator", "")),
             })
 
-    if all_items:
-        # Sort by timestamp (newest first)
-        all_items.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
-        all_items = all_items[:MAX_ITEMS_PER_FEED]
-        cache["think_tanks"] = {
-            "items": all_items,
-            "last_updated": datetime.now(),
-            "error": "; ".join(errors) if errors else None,
-        }
-        logger.info(f"Think tanks: fetched {len(all_items)} articles ({'; '.join(errors)}" if errors else f"Think tanks: fetched {len(all_items)} articles")
-    elif errors:
-        # Preserve last-good items on total failure
-        if not cache["think_tanks"]["items"]:
-            cache["think_tanks"]["error"] = "; ".join(errors)
-        logger.warning(f"Think tanks: all sources failed: {'; '.join(errors)}")
+    if not all_items:
+        if errors:
+            if not cache["think_tanks"]["items"]:
+                cache["think_tanks"]["error"] = "; ".join(errors)
+            logger.warning(f"Think tanks: all sources failed: {'; '.join(errors)}")
+        return
+
+    all_items = all_items[:MAX_ITEMS_PER_FEED]
+
+    # AI-summarize articles (use cached summaries when available)
+    api_key = os.environ.get("ANTHROPIC_API_KEY") if THINK_TANK_SUMMARIZE else None
+    new_summaries = 0
+
+    for item in all_items:
+        url = item["link"]
+
+        # Check cache first
+        if url in _article_summary_cache:
+            item["summary"] = _article_summary_cache[url]
+            continue
+
+        # Rate limit: only summarize N new articles per cycle
+        if api_key and new_summaries < THINK_TANK_SUMMARY_MAX_NEW:
+            article_text = item.get("raw_content", "")
+            if not article_text:
+                article_text = _fetch_article_text(url)
+
+            if article_text:
+                summary = _summarize_article(item["title"], article_text, api_key)
+                if summary:
+                    item["summary"] = summary
+                    _article_summary_cache[url] = summary
+                    new_summaries += 1
+                    continue
+
+        if not item["summary"]:
+            item["summary"] = ""
+
+    # Clean up raw_content from items
+    for item in all_items:
+        item.pop("raw_content", None)
+
+    cache["think_tanks"] = {
+        "items": all_items,
+        "last_updated": datetime.now(),
+        "error": "; ".join(errors) if errors else None,
+    }
+    logger.info(f"Think tanks: {len(all_items)} articles, {new_summaries} newly summarized, {len(_article_summary_cache)} cached")
 
 
 # ============ AI SUMMARY FETCHER ============

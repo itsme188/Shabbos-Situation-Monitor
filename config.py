@@ -112,24 +112,31 @@ THINK_TANK_FEEDS = [
     },
     {
         "name": "CSIS",
-        "url": "https://news.google.com/rss/search?q=site:csis.org+Iran+OR+Israel+OR+Middle+East&hl=en-US&gl=US&ceid=US:en",
-        "type": "google_news",
-        "max_items": 8,
+        "url": "https://www.csis.org/analysis",
+        "type": "scrape",  # Scrape analysis page for article links
+        "max_items": 5,
+        "link_pattern": "/analysis/",  # URL pattern to match article links
+        "base_url": "https://www.csis.org",
     },
     {
         "name": "ISW",
-        "url": "https://news.google.com/rss/search?q=site:understandingwar.org&hl=en-US&gl=US&ceid=US:en",
-        "type": "google_news",
-        "max_items": 5,
+        "url": "https://www.understandingwar.org/publications",
+        "type": "scrape",  # Scrape publications page for article links
+        "max_items": 3,
+        "link_pattern": "/research/middle-east/iran",  # Only Iran-related articles
+        "base_url": "https://understandingwar.org",
     },
 ]
+THINK_TANK_MAX_AGE_HOURS = 36  # Skip articles older than this
+THINK_TANK_SUMMARIZE = True    # AI-summarize each article (uses Haiku)
+THINK_TANK_SUMMARY_MAX_NEW = 5  # Max new articles to summarize per cycle (rate limit)
 
 # AI Summary settings (requires ANTHROPIC_API_KEY environment variable)
 AI_SUMMARY_MAX_TOKENS = 1500
 
 # Multi-day retention: how many days of AI summaries to keep
 # Set to 3 for 3-day Yom Tov, 1 for regular Shabbos
-AI_SUMMARY_RETENTION_DAYS = 3
+AI_SUMMARY_RETENTION_DAYS = 1  # Change to 3 before Yom Tov (Apr 2)
 AI_SUMMARY_MAX_ENTRIES = 30  # ~8 summaries/day × 3 days + buffer
 
 # Inactivity timeout (seconds) — auto-pauses AI when nobody views dashboard
