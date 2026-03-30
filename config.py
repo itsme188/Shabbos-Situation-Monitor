@@ -89,7 +89,7 @@ HAVDALAH_OFFSET = 50         # minutes after Saturday sunset
 # Yom Tov mode: set to end datetime for extended holidays, None for normal Shabbos
 # Format: "YYYY-MM-DDTHH:MM" in ET. Shows "Yom Tov ends: ..." in header.
 # Set before Yom Tov, reset to None after.
-YOM_TOV_END = "2026-04-05T20:30"  # Pesach + Shabbos ends Sat night Apr 5
+YOM_TOV_END = "2026-04-04T20:05"  # Pesach first days + Shabbos, Havdalah Sat Apr 4 (from Hebcal API)
 
 # Cache persistence (survives server restarts)
 CACHE_FILE = "feed_cache.json"
