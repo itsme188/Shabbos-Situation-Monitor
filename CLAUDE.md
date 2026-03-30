@@ -48,7 +48,7 @@
 - Each feed has: fetcher function, cache entry, error state, last_updated timestamp
 - `update_all_feeds()` runs all fetchers concurrently via ThreadPoolExecutor
 - **Dashboard layout**: Strategic Analysis | Middle East | TOI | Raw Feeds (OSINT+Trump merged) | AI Summary
-- **Think tank feed** (`think_tanks` cache key): FDD (direct RSS), CSIS + ISW (Google News site-scoped). Config: `THINK_TANK_FEEDS` list
+- **Think tank feed** (`think_tanks` cache key): FDD (direct RSS), CSIS (scrape `csis.org/analysis`), ISW (scrape `understandingwar.org/publications`). Google News RSS article URLs don't work (JS-only redirect). Each article is AI-summarized via Haiku (cached by URL, max 5 new/cycle). Recency filter: `THINK_TANK_MAX_AGE_HOURS = 36`.
 - **Raw Feeds column**: OSINT + Trump pre-merged in `dashboard()` route, sorted by timestamp, tagged with `feed_source` key
 - **OSINT** backed by `twitter_list` cache key — internal names kept for cache compatibility
 - OSINT uses 5-tier fallback: syndication → TwStalker → BlueSky → Nitter RSS → Nitter HTML → Google News
@@ -66,7 +66,9 @@
 - All timestamps use `format_timestamp()` → converts to ET via `.astimezone()` → `strftime('%a %-I:%M %p')` → "Fri 2:30 PM"
 - `format_timestamp(ts, source_tz=None)`: optional `source_tz` for naive datetimes (e.g. TOI liveblog uses "Asia/Jerusalem")
 - `%-I` is macOS/POSIX only (no leading zero on 12-hour time)
-- Candle lighting time in header status bar.
+- Candle lighting time in header status bar
+- **Hebcal API** auto-detects Yom Tov: `get_yom_tov_info()` queries `hebcal.com/hebcal` for holidays/candles/havdalah. Cached 24h. Header shows holiday name + candle lighting (before) or havdalah (during). `_effective_retention_days()` auto-extends AI summary retention during active Yom Tov.
+- `YOM_TOV_END` config defaults to `None` (auto-detected). Can override manually with ISO datetime string.
 
 ## AI Summary
 - **Schedule-aware generation** (cron at :05 past each hour, ET timezone):
