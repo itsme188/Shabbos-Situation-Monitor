@@ -758,8 +758,8 @@
 
                         {% if entry.get('type') == 'morning' and entry == cache['ai_summary'].get('morning_summary') %}
                             {# Skip — already rendered as pinned section above #}
-                        {% elif entry.get('type') == 'morning' %}
-                            {# Older morning summaries in history — show truncated #}
+                        {% elif entry.get('type') in ('morning', 'candle_lighting') %}
+                            {# Older morning/candle-lighting summaries in history — show truncated #}
                             <div class="feed-item ai-hour-block">
                                 <div class="item-meta">
                                     <span class="item-author" style="font-size: 0.65rem; letter-spacing: 0.03em;">{{ entry.hour_label }}</span>

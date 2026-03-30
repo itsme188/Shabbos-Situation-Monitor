@@ -65,6 +65,9 @@ ai_summary_enabled = False  # Off by default — toggle on via dashboard to avoi
 # Inactivity tracking: auto-pause AI summaries if nobody views the dashboard
 _last_dashboard_view = None  # Set when someone loads the dashboard
 
+# Candle lighting summary dedup: stores the Friday date of the last generated summary
+_last_candle_lighting_summary_date = None
+
 from config import (
     HOST, PORT, DEBUG, REFRESH_INTERVAL,
     TWITTER_ACCOUNTS, TRUMP_TRUTH_RSS, TRUMP_TWITTER_MIRROR,
@@ -86,6 +89,8 @@ from config import (
     AI_SUMMARY_RETENTION_DAYS, AI_SUMMARY_MAX_ENTRIES, AI_INACTIVITY_TIMEOUT,
     THINK_TANK_FEEDS, THINK_TANK_MAX_AGE_HOURS,
     THINK_TANK_SUMMARIZE, THINK_TANK_SUMMARY_MAX_NEW,
+    POLYMARKET_API_BASE, POLYMARKET_TIMEOUT, PREDICTION_MARKETS,
+    AI_SUMMARY_MARKET_THRESHOLD, AI_SUMMARY_CANDLE_LIGHTING_PROMPT,
     YOM_TOV_END,
 )
 
@@ -119,6 +124,7 @@ cache: Dict = {
     "reuters": {"items": [], "last_updated": None, "error": None},
     "toi_liveblog": {"items": [], "last_updated": None, "error": None},
     "think_tanks": {"items": [], "last_updated": None, "error": None},
+    "prediction_markets": {"items": [], "last_updated": None, "error": None},
     "ai_summary": {
         "items": [],
         "last_updated": None,
@@ -1426,6 +1432,119 @@ def parse_toi_liveblog(soup, source_url: str = "") -> List[Dict]:
     return items
 
 
+# ============ PREDICTION MARKETS FETCHER ============
+
+
+def fetch_prediction_markets() -> None:
+    """Fetch Iran geopolitical risk odds from Polymarket Gamma API.
+
+    Not displayed in UI — consumed by morning and candle-lighting AI summaries.
+    """
+    new_items = []
+    errors = []
+
+    for market_def in PREDICTION_MARKETS:
+        try:
+            url = f"{POLYMARKET_API_BASE}/events?slug={market_def['event_slug']}"
+            resp = safe_request(url, timeout=POLYMARKET_TIMEOUT)
+            if not resp:
+                errors.append(f"{market_def['name']}: no response")
+                continue
+
+            events = resp.json()
+            if not events:
+                errors.append(f"{market_def['name']}: empty response")
+                continue
+
+            event = events[0]
+            markets = event.get("markets", [])
+            if not markets:
+                errors.append(f"{market_def['name']}: no markets in event")
+                continue
+
+            # Find the right sub-market
+            target_slug = market_def.get("market_slug")
+            market = None
+            if target_slug:
+                for m in markets:
+                    if m.get("slug") == target_slug:
+                        market = m
+                        break
+                if not market:
+                    open_markets = [m for m in markets if not m.get("closed")]
+                    market = open_markets[-1] if open_markets else markets[-1]
+            else:
+                market = markets[0]
+
+            # Extract "Yes" probability from outcomePrices
+            outcome_prices = market.get("outcomePrices", "[]")
+            if isinstance(outcome_prices, str):
+                prices = json.loads(outcome_prices)
+            else:
+                prices = outcome_prices
+            probability = round(float(prices[0]) * 100) if prices else None
+
+            if probability is None:
+                errors.append(f"{market_def['name']}: no price data")
+                continue
+
+            # Track previous probability for change detection
+            previous = None
+            for old_item in cache["prediction_markets"]["items"]:
+                if old_item.get("name") == market_def["name"]:
+                    previous = old_item.get("probability")
+                    break
+
+            new_items.append({
+                "name": market_def["name"],
+                "probability": probability,
+                "previous": previous,
+                "type": market_def["type"],
+                "source": "polymarket",
+            })
+
+        except Exception as e:
+            logger.warning(f"Prediction market fetch error for {market_def['name']}: {e}")
+            errors.append(f"{market_def['name']}: {str(e)[:60]}")
+
+    if new_items:
+        cache["prediction_markets"]["items"] = new_items
+        cache["prediction_markets"]["last_updated"] = datetime.now()
+        cache["prediction_markets"]["error"] = None
+        logger.info(f"Prediction markets: " + ", ".join(f"{m['name']} {m['probability']}%" for m in new_items))
+    elif errors:
+        cache["prediction_markets"]["error"] = "; ".join(errors[:3])
+        logger.warning(f"Prediction markets: all failed — {'; '.join(errors[:3])}")
+
+
+def _build_market_digest() -> str:
+    """Build a text section describing current prediction market odds for AI context."""
+    items = cache["prediction_markets"].get("items", [])
+    if not items:
+        return ""
+
+    lines = ["\n--- PREDICTION MARKET ODDS (Iran Geopolitical Risk, via Polymarket) ---"]
+    for item in items:
+        prob = item["probability"]
+        prev = item.get("previous")
+        change_str = ""
+        if prev is not None:
+            diff = prob - prev
+            if abs(diff) >= AI_SUMMARY_MARKET_THRESHOLD:
+                arrow = "\u2191" if diff > 0 else "\u2193"
+                change_str = f" (was {prev}% {arrow} SIGNIFICANT SHIFT)"
+            elif diff != 0:
+                arrow = "\u2191" if diff > 0 else "\u2193"
+                change_str = f" (was {prev}%{arrow})"
+            else:
+                change_str = " (unchanged)"
+
+        lines.append(f"{item['name']}: {prob}%{change_str}")
+
+    lines.append(f"\nOnly mention these markets if any probability shifted {AI_SUMMARY_MARKET_THRESHOLD}+ percentage points.")
+    return "\n".join(lines)
+
+
 # ============ THINK TANK FETCHER ============
 
 # Cache for AI-generated article summaries (keyed by article URL)
@@ -1766,7 +1885,7 @@ def _build_feed_digest() -> str:
     ]
 
     for feed_name, feed_data in cache.items():
-        if feed_name == "ai_summary":
+        if feed_name in ("ai_summary", "prediction_markets"):
             continue
         items = feed_data.get("items", [])
         if not items:
@@ -1809,9 +1928,14 @@ def _generate_morning_summary(api_key: str) -> None:
     logger.info("Generating morning AI summary (Opus)...")
 
     feed_digest = _build_feed_digest()
+    market_digest = _build_market_digest()
     if not feed_digest:
         cache["ai_summary"]["error"] = "No feed data available to summarize"
         return
+
+    full_digest = feed_digest
+    if market_digest:
+        full_digest += "\n" + market_digest
 
     max_retries = 2
     for attempt in range(max_retries):
@@ -1823,7 +1947,7 @@ def _generate_morning_summary(api_key: str) -> None:
                 system=AI_SUMMARY_MORNING_PROMPT,
                 messages=[{
                     "role": "user",
-                    "content": f"Here is the current feed data. Summarize overnight developments:\n\n{feed_digest}",
+                    "content": f"Here is the current feed data. Summarize overnight developments:\n\n{full_digest}",
                 }],
             )
 
@@ -2028,6 +2152,133 @@ def fetch_ai_summary(force: bool = False) -> None:
         logger.debug(f"AI summary: hour {current_hour} not on schedule, skipping")
 
 
+# ============ CANDLE LIGHTING SUMMARY ============
+
+
+def _generate_candle_lighting_summary(api_key: str) -> None:
+    """Generate a 'going into Shabbos/Yom Tov' summary with market context (Opus)."""
+    logger.info("Generating candle-lighting AI summary (Opus)...")
+
+    feed_digest = _build_feed_digest()
+    market_digest = _build_market_digest()
+
+    if not feed_digest:
+        cache["ai_summary"]["error"] = "No feed data available to summarize"
+        return
+
+    full_digest = feed_digest
+    if market_digest:
+        full_digest += "\n" + market_digest
+
+    max_retries = 2
+    for attempt in range(max_retries):
+        try:
+            client = anthropic.Anthropic(api_key=api_key)
+            message = client.messages.create(
+                model=AI_SUMMARY_MORNING_MODEL,  # Opus for quality
+                max_tokens=AI_SUMMARY_MAX_TOKENS,
+                system=AI_SUMMARY_CANDLE_LIGHTING_PROMPT,
+                messages=[{
+                    "role": "user",
+                    "content": f"Here is the current situation as Shabbos begins:\n\n{full_digest}",
+                }],
+            )
+
+            summary_text = message.content[0].text.strip()
+            gen_time = datetime.now()
+            gen_et = datetime.now(ZoneInfo("America/New_York"))
+
+            candle_entry = {
+                "type": "candle_lighting",
+                "text": summary_text,
+                "generated_at": gen_time.isoformat(),
+                "generated_at_display": gen_et.strftime("%a %-I:%M %p ET"),
+                "hour_label": "Candle Lighting Summary",
+                "bullets": [],
+            }
+
+            summaries = cache["ai_summary"].get("summaries", [])
+            summaries.insert(0, candle_entry)
+            cache["ai_summary"]["summaries"] = summaries[:AI_SUMMARY_MAX_ENTRIES]
+
+            cache["ai_summary"]["items"] = []
+            cache["ai_summary"]["last_updated"] = gen_time
+            cache["ai_summary"]["error"] = None
+
+            logger.info("Candle-lighting AI summary generated (Opus)")
+            return
+
+        except anthropic.AuthenticationError as e:
+            logger.error(f"Candle-lighting summary: auth error — {e}")
+            cache["ai_summary"]["error"] = "API key invalid — check .env file"
+            return
+
+        except (anthropic.APIConnectionError, anthropic.InternalServerError, anthropic.RateLimitError) as e:
+            if attempt < max_retries - 1:
+                logger.warning(f"Candle-lighting summary: transient error (attempt {attempt + 1}), retrying in 30s: {e}")
+                time.sleep(30)
+            else:
+                logger.warning(f"Candle-lighting summary error after {max_retries} attempts: {e}")
+
+        except Exception as e:
+            logger.warning(f"Candle-lighting summary error: {e}")
+            return
+
+
+def _check_candle_lighting_summary() -> None:
+    """Check if it's time to generate the candle-lighting AI summary.
+
+    Runs every 5 minutes on Fridays (and Yom Tov eves) via APScheduler.
+    Generates a summary within 10 minutes after candle lighting time.
+    """
+    global _last_candle_lighting_summary_date
+
+    if not ai_summary_enabled:
+        return
+
+    now_et = datetime.now(ZoneInfo("America/New_York"))
+
+    # Check regular Shabbos (Fridays)
+    if now_et.weekday() == 4:  # Friday
+        today = now_et.date()
+        if _last_candle_lighting_summary_date == today:
+            return
+
+        shabbos_times = get_shabbos_times()
+        candle_time = shabbos_times["candle_lighting"]
+        minutes_since = (now_et - candle_time).total_seconds() / 60
+        if not (0 <= minutes_since <= 10):
+            return
+
+        logger.info(f"Candle lighting detected ({candle_time.strftime('%-I:%M %p')}), generating summary...")
+    else:
+        # Check Yom Tov candle lighting via Hebcal
+        yt = get_yom_tov_info()
+        if not yt or yt.get("active"):
+            return  # Already in Yom Tov or no Yom Tov upcoming
+        candle_time = yt["candle_lighting"]
+        today = now_et.date()
+        if _last_candle_lighting_summary_date == today:
+            return
+        if candle_time.date() != today:
+            return
+        minutes_since = (now_et - candle_time).total_seconds() / 60
+        if not (0 <= minutes_since <= 10):
+            return
+
+        logger.info(f"Yom Tov candle lighting detected ({yt['name']}, {candle_time.strftime('%-I:%M %p')}), generating summary...")
+
+    if not HAS_ANTHROPIC:
+        return
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        return
+
+    _generate_candle_lighting_summary(api_key)
+    _last_candle_lighting_summary_date = now_et.date()
+
+
 # ============ MAIN UPDATE FUNCTION ============
 
 def update_all_feeds() -> None:
@@ -2042,9 +2293,10 @@ def update_all_feeds() -> None:
         "reuters": fetch_reuters,
         "toi": fetch_toi,
         "think_tanks": fetch_think_tanks,
+        "prediction_markets": fetch_prediction_markets,
     }
 
-    with ThreadPoolExecutor(max_workers=5) as executor:
+    with ThreadPoolExecutor(max_workers=6) as executor:
         futures = {
             executor.submit(fn): name
             for name, fn in fetchers.items()
@@ -2289,7 +2541,18 @@ if __name__ == "__main__":
             id="ai_summary_updater",
             timezone="America/New_York",
         )
+        # Candle-lighting summary: every 5 min, 4-8 PM ET daily
+        # Checks internally if it's Friday or Yom Tov eve
+        scheduler.add_job(
+            _check_candle_lighting_summary,
+            "cron",
+            hour="16-20",
+            minute="*/5",
+            id="candle_lighting_summary",
+            timezone="America/New_York",
+        )
         logger.info("AI summary scheduler registered (hourly at :05, schedule-aware)")
+        logger.info("Candle-lighting summary scheduler registered (daily 4-8 PM ET, checks for Shabbos/Yom Tov)")
         if os.environ.get("ANTHROPIC_API_KEY"):
             logger.info("AI summary ready: API key found")
         else:

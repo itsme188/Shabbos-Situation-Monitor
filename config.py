@@ -133,6 +133,38 @@ THINK_TANK_MAX_AGE_HOURS = 36  # Skip articles older than this
 THINK_TANK_SUMMARIZE = True    # AI-summarize each article (uses Haiku)
 THINK_TANK_SUMMARY_MAX_NEW = 5  # Max new articles to summarize per cycle (rate limit)
 
+# Prediction Markets — Polymarket Gamma API (no auth required)
+# Used for AI summary context only (no UI display). Fetched every cycle.
+POLYMARKET_API_BASE = "https://gamma-api.polymarket.com"
+POLYMARKET_TIMEOUT = 10  # seconds per request
+PREDICTION_MARKETS = [
+    {
+        "name": "Nuclear Deal",
+        "event_slug": "us-iran-nuclear-deal-before-2027",
+        "market_slug": None,  # single-market event
+        "type": "deescalation",
+    },
+    {
+        "name": "US Forces in Iran",
+        "event_slug": "us-forces-enter-iran-by",
+        "market_slug": "us-forces-enter-iran-by-december-31-573-642-385-371-179",
+        "type": "escalation",
+    },
+    {
+        "name": "Ground Invasion",
+        "event_slug": "will-the-us-invade-iran-before-2027",
+        "market_slug": None,
+        "type": "escalation",
+    },
+    {
+        "name": "Ceasefire by June 30",
+        "event_slug": "iran-x-israelus-conflict-ends-by",
+        "market_slug": "iran-x-israelus-conflict-ends-by-june-30-813-454",
+        "type": "deescalation",
+    },
+]
+AI_SUMMARY_MARKET_THRESHOLD = 5  # min percentage-point change to mention in summary
+
 # AI Summary settings (requires ANTHROPIC_API_KEY environment variable)
 AI_SUMMARY_MAX_TOKENS = 1500
 
@@ -164,6 +196,7 @@ Rules:
 - Mention 3-5 most important developments
 - If think tank analysis articles are available, synthesize their strategic assessments into the narrative
 - All times should be in ET (Eastern Time) using Day H:MM AM/PM format (e.g., Sat 3:15 AM)
+- If prediction market odds are provided, mention any that shifted meaningfully (5+ percentage points) — these reflect how betting markets assess the probability of key events
 - End with a short paragraph titled "Market Outlook:" covering potential stock market, oil, and defense sector implications of the overnight developments
 - If nothing significant happened overnight, say so briefly in one paragraph
 """
@@ -187,4 +220,16 @@ Rules:
 - Valid categories: Military, Diplomatic, Political, Breaking, Markets, Strategic
 - After the bullets, add a single line: [Market Signal] followed by a one-sentence assessment of potential stock market, oil, or defense sector implications
 - If nothing significant is happening, say so briefly
+"""
+
+AI_SUMMARY_CANDLE_LIGHTING_PROMPT = """You are a concise news analyst monitoring the Middle East situation.
+Write a brief "going into Shabbos" summary of where things stand right now.
+Rules:
+- Write 1-3 short paragraphs in flowing prose
+- Focus on the current state of affairs and trajectory (escalating/de-escalating/stable)
+- Mention the most significant developments from today
+- If prediction market odds are provided, mention any that shifted meaningfully (5+ percentage points)
+- If think tank analysis articles are available, note key strategic assessments
+- All times should be in ET (Eastern Time) using Day H:MM AM/PM format
+- Keep it concise — this is a quick status check before Shabbos begins
 """
