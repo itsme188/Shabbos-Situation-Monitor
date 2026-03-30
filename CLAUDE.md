@@ -9,12 +9,12 @@
 ## Architecture
 - Flask on Python 3, port 8080, binds 0.0.0.0
 - APScheduler refreshes feeds every 5 min; watchdog checks per-feed staleness (not aggregate)
-- `feed_cache.json` persists across restarts (max 2hr age, atomic writes, `schema_version: 1`, backoff state)
-- `start.sh` has auto-restart loop, venv management, graceful SIGINT handling, **port-check guard** against duplicate instances
+- `feed_cache.json` persists across restarts (max 2hr age, atomic writes, `schema_version: 1`, backoff state, AI toggle state)
+- `start.sh` has auto-restart loop, venv management, graceful SIGINT handling, **port-check guard**, **caffeinate** (sleep prevention), **crash-loop limit** (10 in 10min)
 
 ## Key Files
-- `server.py` — main app (~1840 lines), routes, scheduler, all feed fetchers
-- `config.py` — HOST, PORT, REFRESH_INTERVAL, feed URLs, OSINT account lists (11 accounts)
+- `server.py` — main app (~1900 lines), routes, scheduler, all feed fetchers
+- `config.py` — HOST, PORT, REFRESH_INTERVAL, feed URLs, OSINT account lists, think tank feeds, AI prompts, Yom Tov settings
 - `start.sh` — production launcher with crash recovery
 - `launcher.applescript` — macOS one-click startup (health-polls, reuses Safari tabs, error dialog)
 - `templates/index.html` — dashboard template
@@ -47,7 +47,10 @@
 ## Feed Architecture
 - Each feed has: fetcher function, cache entry, error state, last_updated timestamp
 - `update_all_feeds()` runs all fetchers concurrently via ThreadPoolExecutor
-- **OSINT column** (UI label) backed by `twitter_list` cache key — internal names kept for cache compatibility
+- **Dashboard layout**: Strategic Analysis | Middle East | TOI | Raw Feeds (OSINT+Trump merged) | AI Summary
+- **Think tank feed** (`think_tanks` cache key): FDD (direct RSS), CSIS + ISW (Google News site-scoped). Config: `THINK_TANK_FEEDS` list
+- **Raw Feeds column**: OSINT + Trump pre-merged in `dashboard()` route, sorted by timestamp, tagged with `feed_source` key
+- **OSINT** backed by `twitter_list` cache key — internal names kept for cache compatibility
 - OSINT uses 5-tier fallback: syndication → TwStalker → BlueSky → Nitter RSS → Nitter HTML → Google News
 - **TwStalker** (`twstalker.com`): primary source, works for 11 active accounts. Uses `curl` subprocess (not Python `requests`) because TwStalker blocks via TLS fingerprinting. `threading.Semaphore(2)` rate-limits concurrent requests. IsraelRadar_ and YoavLimor use JS-rendered pages (unfetchable without headless browser)
 - BlueSky (`public.api.bsky.app`): open API, no auth. Only Faytuks is active on BlueSky (others dormant). `BLUESKY_HANDLES` in config
@@ -73,9 +76,13 @@
 - **Two-model strategy**: Haiku for regular 2-hour summaries (fast/cheap), Opus for morning summary (best quality)
 - Prompt requires `[Category] Day H:MM AM/PM - description` format. Parser regex handles both old 24-hour and new AM/PM formats, dash variants `[-–—]`
 - All times in ET. Feed digest includes timezone context header for the LLM
-- Valid categories: Military, Diplomatic, Political, Breaking, Markets
-- Cache fields: `summaries[]`, `morning_summary` — all persisted to `feed_cache.json`
+- Valid categories: Military, Diplomatic, Political, Breaking, Markets, Strategic
+- Each regular summary includes a `[Market Signal]` line — one-sentence market implications
+- `_parse_ai_bullets()` returns `(bullets, market_signal)` tuple
+- Cache fields: `summaries[]`, `morning_summary`, `ai_summary_enabled` — all persisted to `feed_cache.json`
 - Manual refresh (`/api/refresh-ai`) uses `force=True` to bypass schedule check
+- **Yom Tov mode** (`AI_SUMMARY_RETENTION_DAYS > 1`): keeps N days of summaries, disables auto-pause, increases cap to `AI_SUMMARY_MAX_ENTRIES` (30). Day separators in template for multi-day viewing.
+- `YOM_TOV_END` config: set to ISO datetime string to show "Yom Tov ends ..." in header instead of Shabbos times. Reset to `None` after holiday.
 
 ## Lessons & Best Practices
 - **Truthy-but-empty HTML**: RSS fields like `<p></p>` are truthy strings that yield nothing after stripping. Always validate *processed* output, not raw input, before using it.
@@ -98,4 +105,10 @@
 - **Always test with live data**: Import validation and syntax checks don't catch data-quality bugs like stale URLs returning old content. Run the actual fetcher and inspect the output.
 - **Polymarket Gamma API**: Public REST, no auth. `events?slug=...` returns array of events with nested `markets[]`. Each market has `outcomePrices` (JSON string `'["0.40","0.60"]'`, index 0 = Yes probability). Multi-outcome events (e.g., "by March 31" / "by Dec 31") need sub-market slug targeting.
 - **Metaculus API requires auth**: Returns 403 without API token. Free account needed. Not used currently.
-- **Pending branch**: `feature/prediction-markets-ai-summary` — prediction market odds in AI summaries + candle-lighting Friday summary. Not yet deployed.
+- **Pending branch**: `feature/prediction-markets-ai-summary` — prediction market odds in AI summaries + candle-lighting Friday summary. Not yet deployed. WARNING: has regressions (lost ET timestamp fix, removed pruning). Must cherry-pick, not merge.
+- **Think tank RSS**: FDD has working WordPress RSS with `content:encoded`. CSIS direct RSS (`/rss.xml`) is stale 2016 data — use Google News site-scoped instead. ISW direct RSS redirects to HTML — use Google News `site:understandingwar.org`.
+- **Google News RSS site-scoping**: `https://news.google.com/rss/search?q=site:example.com+keywords` returns fresh articles from a specific domain. Title format is "Article Title - Source Name" — split on last " - " to extract source.
+- **AI toggle persistence**: `ai_summary_enabled` must be saved to disk (feed_cache.json). Default is `False`; if not persisted, any server restart during unattended operation silently kills AI summaries.
+- **ThreadPoolExecutor TimeoutError**: `as_completed(timeout=N)` raises `TimeoutError` when the deadline passes. Must wrap in try-except or the entire update cycle silently fails, abandoning pending futures.
+- **caffeinate for long-running processes**: `caffeinate -i -w $$` prevents macOS idle sleep, tied to parent process lifetime. Essential for 72hr+ unattended operation.
+- **Crash-loop detection**: Track restart timestamps in a sliding window. After N rapid restarts, exit instead of looping forever — prevents disk-filling log spam from fatal bugs.
