@@ -1,28 +1,27 @@
 # Shabbos Situation Monitor
 
-A hands-free, auto-refreshing local dashboard for monitoring Iran/Israel/Middle East news during Shabbos. No interaction required once started.
+A hands-free, auto-refreshing local dashboard for monitoring Iran/Israel/Middle East developments during Shabbos and Yom Tov. Designed for zero interaction once started — AI-powered summaries, strategic analysis, and prediction market context delivered on a schedule.
+
+## Dashboard
+
+5-column layout with auto-scrolling columns:
+
+| Strategic Analysis | Middle East | Times of Israel | Raw Feeds | AI Summary |
+|---|---|---|---|---|
+| FDD, CSIS, ISW articles with AI-generated summaries | Google News + BBC fallback | Liveblog + RSS | OSINT accounts + Trump (merged) | Hourly bullets + morning prose + market signals |
 
 ## Features
 
-- **Twitter Feeds** - OSINT accounts tracking Middle East security (via Nitter)
-- **Trump Truth Social** - Latest posts from Trump's Truth Social
-- **Middle East News** - Google News aggregation for Iran/Israel coverage
-- **Times of Israel** - RSS feed from TOI
-- **Polymarket Odds** - Live prediction market probabilities for Iran strike scenarios
-- **Auto-refresh** - Page refreshes every 5 minutes automatically
-- **Auto-scroll** - Twitter column scrolls through all tweets within the refresh window
-
-## Screenshot
-
-![Shabbos Situation Monitor](images/screenshot.png)
-
-Light, minimal design with earth-tone accents for easy reading.
+- **Strategic Analysis** — Think tank articles from FDD (RSS), CSIS, and ISW (direct scraping) with per-article AI summaries via Claude Haiku
+- **AI Summary** — Schedule-aware generation: morning summary (Opus, prose), 2-hour bullet summaries (Haiku), candle-lighting summary (Opus, fires automatically at candle lighting time)
+- **Market Lens** — Each AI summary includes a `[Market Signal]` line assessing stock/oil/defense implications. `[Strategic]` category for think tank insights.
+- **Prediction Markets** — Polymarket odds for Iran risk scenarios (Nuclear Deal, US Forces, Ground Invasion, Ceasefire) fed into AI prompts
+- **OSINT Feeds** — 11 Twitter/X accounts via 5-tier fallback (syndication, TwStalker, BlueSky, Nitter, Google News)
+- **Yom Tov Detection** — Hebcal API auto-detects holiday dates, extends AI summary retention, disables auto-pause, adjusts refresh interval (15 min vs 10 min)
+- **Reliability** — Exponential backoff on rate limits, crash-loop protection, caffeinate sleep prevention, AI toggle persistence across restarts, ThreadPoolExecutor timeout handling
 
 ## Quick Start (Mac)
 
-**Step 1:** Open Terminal (press Cmd+Space, type "Terminal", hit Enter)
-
-**Step 2:** Copy and paste these commands one at a time, pressing Enter after each:
 ```bash
 cd ~/Desktop
 git clone https://github.com/itsme188/Shabbos-Situation-Monitor.git
@@ -30,110 +29,67 @@ cd Shabbos-Situation-Monitor
 ./start.sh
 ```
 
-**Step 3:** Open your browser and go to: **http://localhost:8080**
+Open **http://127.0.0.1:8080** in Safari. Toggle AI summary ON via the dashboard switch.
 
-**Step 4:** Leave it open — it refreshes automatically every 5 minutes!
+An AppleScript launcher app is included for one-click startup from the Desktop.
 
-### Manual Setup (if the above doesn't work)
+## Architecture
 
-```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-python server.py
-```
+- **Flask** on Python 3, port 8080, binds 0.0.0.0
+- **APScheduler** refreshes feeds every 10 minutes (15 during Yom Tov); AI summaries hourly at :05; candle-lighting check 4-8 PM daily
+- **6 concurrent fetchers** via ThreadPoolExecutor: OSINT, Trump, Reuters/BBC, TOI, Think Tanks, Prediction Markets
+- **feed_cache.json** persists across restarts (atomic writes, schema versioning, backoff state, AI toggle state)
+- **start.sh** manages venv, auto-restart with crash-loop detection (max 10 in 10 min), caffeinate for macOS sleep prevention
 
-### Troubleshooting: SSL Errors / No Fresh Data
+## Key Files
 
-If all feeds fail with `SSLError(PermissionError(1, 'Operation not permitted'))`, your Python's SSL library is too old for macOS. The fix is to use a newer Python (3.12+) which bundles its own OpenSSL.
+| File | Purpose |
+|------|---------|
+| `server.py` | Main app (~2500 lines) — routes, scheduler, all fetchers, AI summary, Hebcal integration |
+| `config.py` | All configuration — feed URLs, accounts, AI prompts, Polymarket markets, Yom Tov settings |
+| `start.sh` | Production launcher with crash recovery, sleep prevention, port guards |
+| `templates/index.html` | Dashboard template — 5-column grid, auto-scroll, day separators |
+| `launcher.applescript` | macOS one-click startup (compiled into .app on Desktop) |
 
-**Important:** You must use the *full path* to Homebrew's Python when creating the venv. Running just `python3.12` may still resolve to the system Python, which won't fix the issue.
+## AI Summary Schedule (ET)
 
-```bash
-brew install python@3.12
-cd ~/Desktop/Shabbos-Situation-Monitor
-rm -rf venv
-/opt/homebrew/bin/python3.12 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-python server.py
-```
+| Time | Type | Model | Content |
+|------|------|-------|---------|
+| 1-7 AM | Quiet hours | — | No generation |
+| 8 AM | Morning summary | Opus | Multi-paragraph prose covering overnight |
+| 10 AM - 12 AM | 2-hour summaries | Haiku | 8 bullets max + `[Market Signal]` line |
+| Candle lighting | Shabbos/Yom Tov summary | Opus | "Going into Shabbos" status check |
 
-**Why this happens:** macOS-bundled Python (3.9 and earlier) uses LibreSSL 2.8.3, which macOS may block from making HTTPS connections. Homebrew Python 3.12+ ships its own OpenSSL (3.x) and avoids this entirely.
-
-**How to verify the fix worked:** After rebuilding the venv, run:
-```bash
-source venv/bin/activate
-python -c "import ssl; print(ssl.OPENSSL_VERSION)"
-```
-You should see `OpenSSL 3.x.x` — if you still see `LibreSSL 2.8.3`, the venv was created with the wrong Python. Delete it and recreate using the full `/opt/homebrew/bin/python3.12` path.
-
-**Terminal gotcha:** If you had the old venv activated in your terminal before rebuilding, your shell still points to the old Python. Open a fresh terminal window (or run `deactivate` then `source venv/bin/activate`) to pick up the new venv.
-
-### Troubleshooting: Port Already In Use
-
-If you see `Address already in use` when starting the server, a previous instance is still running:
-
-```bash
-lsof -ti:8080 | xargs kill
-python server.py
-```
-
-### Troubleshooting: Twitter Column Empty
-
-Twitter/X data is the most fragile feed source. The server tries two methods:
-1. **Twitter Syndication API** (`syndication.twitter.com`) — tried first
-2. **Nitter instances** (xcancel.com, nitter.poast.org, etc.) — fallback
-
-Both frequently return 503 errors or go offline entirely. This is an upstream service issue, not a problem with your setup. The other four columns (Trump, Middle East News, Times of Israel, Polymarket) should still work fine even when Twitter is down.
-
-Check the `/health` endpoint (http://localhost:8080/health) to see which feeds are working and which have errors.
+Valid categories: Military, Diplomatic, Political, Breaking, Markets, Strategic
 
 ## Configuration
 
 Edit `config.py` to customize:
 
-- `TWITTER_ACCOUNTS` - List of Twitter handles to monitor
-- `REFRESH_INTERVAL` - How often to fetch new data (default: 300 seconds)
-- `MAX_ITEMS_PER_FEED` - Maximum items shown per column
-- `POLYMARKET_EVENT_SLUG` - Which Polymarket event to track
-
-## Twitter Accounts Monitored
-
-- @Faytuks - Iran/Israel news
-- @sentdefender - OSINT
-- @IntelCrab - Conflict tracking
-- @AuroraIntel - Air/missile tracking
-- @IsraelRadar_ - Israeli security
-- @JoeTruzman - Gaza/Iran/Hezbollah
-- And more...
-
-## Tech Stack
-
-- Python/Flask backend
-- APScheduler for background fetching
-- Nitter instances for Twitter data (no API key needed)
-- Jinja2 templates
-- Vanilla JS for auto-scroll
-
-## Known Issues
-
-- **Nitter instances are unreliable** - They frequently return 503 errors or go offline entirely. The Twitter syndication API (`syndication.twitter.com`) is tried first but may also fail. Twitter/X data is the most fragile feed source. This is an upstream infrastructure problem with no local fix.
-- **All feeds can fail silently** - If fetches fail, the dashboard shows stale cached data from the last successful fetch rather than displaying errors prominently. Check `server.log` or the `/health` endpoint to diagnose.
-- **macOS SSL compatibility** - Python 3.9 and older may not be able to make HTTPS requests on newer macOS versions. See the SSL troubleshooting section above. The key lesson: always use the full Homebrew path (`/opt/homebrew/bin/python3.12`) when creating the venv, not just `python3.12`.
-- **Stale terminal sessions** - If you rebuild the venv while it's activated in your current terminal, the shell will still reference the old Python. Always open a fresh terminal or run `deactivate && source venv/bin/activate` after rebuilding.
+- `TWITTER_ACCOUNTS` — OSINT account list (11 accounts)
+- `THINK_TANK_FEEDS` — RSS and scrape sources for strategic analysis
+- `PREDICTION_MARKETS` — Polymarket event slugs for risk monitoring
+- `REFRESH_INTERVAL` / `REFRESH_INTERVAL_YOM_TOV` — Feed update frequency
+- `AI_SUMMARY_RETENTION_DAYS` — Days of AI summaries to keep (auto-extends during Yom Tov via Hebcal)
+- `YOM_TOV_END` — Override auto-detection with manual ISO datetime, or `None` for Hebcal auto-detect
+- `AI_SUMMARY_*_PROMPT` — Customize AI summary prompts (morning, regular, candle-lighting)
 
 ## Diagnostics
 
-- **`/health` endpoint** — http://localhost:8080/health returns JSON showing each feed's item count, last update time, and any errors. This is the fastest way to see what's working.
-- **`server.log`** — Detailed log of every fetch attempt. Check here for specific error messages. Note: this file can grow large (50MB+) over time.
-- **`/refresh` endpoint** — http://localhost:8080/refresh triggers an immediate feed update cycle without waiting for the 5-minute timer.
+- **`/health`** — JSON status of all feeds (item count, last update, errors)
+- **`/api/refresh-ai`** — Force immediate AI summary generation
+- **`/api/toggle-ai`** — Toggle AI on/off
+- **`server.log`** — Rotating log (50MB max, 5 backups)
 
-## Notes
+## Tech Stack
 
-- The page auto-refreshes via `<meta http-equiv="refresh">` - no JavaScript polling
-- Designed to run on localhost; not intended for production deployment
-- 4 of 5 feed sources (Trump, Google News, TOI, Polymarket) are generally reliable. Twitter is the only consistently problematic source due to Nitter/syndication instability.
+- Python 3 / Flask / Jinja2
+- APScheduler for background fetching
+- Claude API (Anthropic) for AI summaries
+- BeautifulSoup for HTML scraping
+- feedparser for RSS
+- Hebcal API for Jewish calendar
+- Polymarket Gamma API for prediction markets
 
 ## License
 
