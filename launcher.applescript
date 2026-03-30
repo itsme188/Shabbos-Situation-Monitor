@@ -3,7 +3,7 @@
 -- Double-click to use; polls /health instead of blind delay.
 
 set serverPort to "8080"
-set dashboardURL to "http://localhost:" & serverPort
+set dashboardURL to "http://127.0.0.1:" & serverPort
 set maxWait to 30 -- seconds to wait for server startup
 
 -- Check if server is already running
