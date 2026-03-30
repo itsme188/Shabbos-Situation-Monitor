@@ -146,11 +146,47 @@
             display: inline-block;
         }
 
-        .feed-header.twitter-list .indicator { background: var(--accent-slate); }
-        .feed-header.trump .indicator { background: var(--accent-clay); }
+        .feed-header.think-tanks .indicator { background: #5b7a9d; }
+        .feed-header.raw-feeds .indicator { background: var(--accent-slate); }
         .feed-header.iran .indicator { background: var(--accent-dusty-rose); }
         .feed-header.toi .indicator { background: var(--accent-moss); }
         .feed-header.ai-summary .indicator { background: var(--accent-sand); }
+
+        .source-badge {
+            display: inline-block;
+            background: var(--bg-header);
+            color: var(--text-muted);
+            padding: 0.1rem 0.35rem;
+            border-radius: 2px;
+            font-size: 0.55rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+            border: 1px solid var(--border-light);
+        }
+
+        .market-signal {
+            padding: 0.4rem 0.75rem;
+            margin-top: 0.25rem;
+            font-size: 0.75rem;
+            font-style: italic;
+            color: var(--accent-clay);
+            border-left: 2px solid var(--accent-clay);
+            background: #fef9ec;
+        }
+
+        .day-separator {
+            text-align: center;
+            padding: 0.4rem;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            font-size: 0.65rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            border-bottom: 2px solid var(--border);
+            background: var(--bg-header);
+        }
 
         .feed-count {
             font-size: 0.7rem;
@@ -492,7 +528,7 @@
     <header>
         <h1>Shabbos Situation Monitor</h1>
         <div class="status">
-            {% for feed_key, feed_label in [('twitter_list', 'OSINT'), ('trump', 'Trump'), ('reuters', 'News'), ('toi_liveblog', 'TOI'), ('ai_summary', 'AI')] %}
+            {% for feed_key, feed_label in [('think_tanks', 'Analysis'), ('reuters', 'News'), ('toi_liveblog', 'TOI'), ('twitter_list', 'Raw'), ('ai_summary', 'AI')] %}
             {% if cache.get(feed_key) %}
             {% set lu = cache[feed_key]['last_updated'] %}
             {% set age = ((generated_at - lu).total_seconds() / 60)|int if lu else -1 %}
@@ -507,7 +543,11 @@
             <span class="status-item" style="margin-left: 0.5rem; padding-left: 1rem; border-left: 1px solid var(--border);">
                 {{ generated_at.strftime('%a %-I:%M %p') }}
             </span>
-            {% if shabbos_times %}
+            {% if yom_tov_end %}
+            <span class="status-item" style="margin-left: 0.25rem; color: var(--text-muted); font-size: 0.7rem;">
+                Yom Tov ends {{ yom_tov_end_display }}
+            </span>
+            {% elif shabbos_times %}
             <span class="status-item" style="margin-left: 0.25rem; color: var(--text-muted); font-size: 0.7rem;">
                 Candles {{ shabbos_times.candle_lighting_display }}
             </span>
@@ -516,75 +556,39 @@
     </header>
 
     <div class="grid">
-        <!-- OSINT Column -->
+        <!-- Strategic Analysis Column (Think Tanks) -->
         <div class="feed">
-            <div class="feed-header twitter-list">
-                <span>
-                    <span class="indicator"></span>
-                    {% if cache['twitter_list'].get('source') == 'google_news' %}
-                        OSINT <span style="font-size: 0.6rem; font-weight: 400; text-transform: none;">(via Google News)</span>
-                    {% else %}
-                        OSINT
-                    {% endif %}
-                </span>
+            <div class="feed-header think-tanks">
+                <span><span class="indicator"></span>Strategic Analysis</span>
                 <span class="feed-count">
-                    {{ cache['twitter_list']['items']|length }}
-                    {{ stale_badge(cache['twitter_list']['last_updated'], generated_at) }}
+                    {{ cache['think_tanks']['items']|length }}
+                    {{ stale_badge(cache['think_tanks']['last_updated'], generated_at) }}
                 </span>
             </div>
-            <div class="feed-content" id="twitter-scroll">
-                {% if cache['twitter_list']['error'] and not cache['twitter_list']['items'] %}
-                    <div class="error-message">{{ cache['twitter_list']['error'] }}</div>
-                {% elif not cache['twitter_list']['items'] %}
-                    <div class="no-items">No items available</div>
+            <div class="feed-content" id="think-tanks-scroll">
+                {% if cache['think_tanks']['error'] and not cache['think_tanks']['items'] %}
+                    <div class="error-message">{{ cache['think_tanks']['error'] }}</div>
+                {% elif not cache['think_tanks']['items'] %}
+                    <div class="no-items">Fetching think tank articles...</div>
                 {% else %}
-                    {% if cache['twitter_list']['error'] %}
-                    <div class="cached-warning">{{ cache['twitter_list']['error'] }}</div>
+                    {% if cache['think_tanks']['error'] %}
+                    <div class="cached-warning">{{ cache['think_tanks']['error'] }}</div>
                     {% endif %}
-                    {% for item in cache['twitter_list']['items'] %}
+                    {% for item in cache['think_tanks']['items'] %}
                     <div class="feed-item">
                         <div class="item-meta">
-                            <span class="item-author">@{{ item.author }}</span>
+                            <span class="item-author">
+                                <span class="source-badge">{{ item.source }}</span>
+                                {% if item.author %} {{ item.author }}{% endif %}
+                            </span>
                             <span class="item-time">{{ item.timestamp_display }}</span>
                         </div>
-                        <div class="item-text">{{ item.text }}</div>
-                    </div>
-                    {% endfor %}
-                {% endif %}
-            </div>
-            {% if cache['twitter_list'].get('account_status') %}
-            <div class="account-status-bar">
-                {% for acct, ok in cache['twitter_list']['account_status'].items() %}
-                <span class="acct-dot {{ 'acct-ok' if ok else 'acct-fail' }}" title="@{{ acct }}"></span>
-                {% endfor %}
-            </div>
-            {% endif %}
-        </div>
-
-        <!-- Trump Column -->
-        <div class="feed">
-            <div class="feed-header trump">
-                <span><span class="indicator"></span>Trump</span>
-                <span class="feed-count">
-                    {{ cache['trump']['items']|length }}
-                    {{ stale_badge(cache['trump']['last_updated'], generated_at) }}
-                </span>
-            </div>
-            <div class="feed-content" id="trump-scroll">
-                {% if cache['trump']['error'] and not cache['trump']['items'] %}
-                    <div class="error-message">{{ cache['trump']['error'] }}</div>
-                {% elif not cache['trump']['items'] %}
-                    <div class="no-items">No items available</div>
-                {% else %}
-                    {% if cache['trump']['error'] %}
-                    <div class="cached-warning">{{ cache['trump']['error'] }}</div>
-                    {% endif %}
-                    {% for item in cache['trump']['items'] %}
-                    <div class="feed-item">
-                        <div class="item-meta">
-                            <span class="item-time">{{ item.timestamp_display }}</span>
-                        </div>
-                        <div class="item-text">{{ item.text }}</div>
+                        {% if item.title %}
+                        <div class="item-title">{{ item.title }}</div>
+                        {% endif %}
+                        {% if item.summary %}
+                        <div class="item-text">{{ item.summary }}</div>
+                        {% endif %}
                     </div>
                     {% endfor %}
                 {% endif %}
@@ -664,6 +668,37 @@
             </div>
         </div>
 
+        <!-- Raw Feeds Column (OSINT + Trump merged) -->
+        <div class="feed">
+            <div class="feed-header raw-feeds">
+                <span><span class="indicator"></span>Raw Feeds</span>
+                <span class="feed-count">
+                    {{ merged_raw_feeds|length }}
+                </span>
+            </div>
+            <div class="feed-content" id="raw-feeds-scroll">
+                {% if not merged_raw_feeds %}
+                    <div class="no-items">No items available</div>
+                {% else %}
+                    {% for item in merged_raw_feeds %}
+                    <div class="feed-item">
+                        <div class="item-meta">
+                            <span class="item-author">
+                                {% if item.feed_source == 'trump' %}
+                                    <span class="source-badge" style="background: #fef0e0; border-color: var(--accent-clay);">Trump</span>
+                                {% else %}
+                                    @{{ item.author }}
+                                {% endif %}
+                            </span>
+                            <span class="item-time">{{ item.timestamp_display }}</span>
+                        </div>
+                        <div class="item-text">{{ item.text }}</div>
+                    </div>
+                    {% endfor %}
+                {% endif %}
+            </div>
+        </div>
+
         <!-- AI Summary Column -->
         <div class="feed">
             <div class="feed-header ai-summary">
@@ -704,9 +739,19 @@
                     </div>
                     {% endif %}
 
-                    {# === Summary blocks (newest first) === #}
+                    {# === Summary blocks (newest first) with day separators === #}
                     {% if cache['ai_summary'].get('summaries') %}
+                        {% set prev_date = namespace(val='') %}
                         {% for entry in cache['ai_summary']['summaries'] %}
+                        {# Day separator when date changes (for multi-day Yom Tov) #}
+                        {% set entry_date = entry.generated_at[:10] %}
+                        {% if entry_date != prev_date.val %}
+                            {% if prev_date.val != '' %}
+                            <div class="day-separator">{{ entry_date }}</div>
+                            {% endif %}
+                            {% set prev_date.val = entry_date %}
+                        {% endif %}
+
                         {% if entry.get('type') == 'morning' and entry == cache['ai_summary'].get('morning_summary') %}
                             {# Skip — already rendered as pinned section above #}
                         {% elif entry.get('type') == 'morning' %}
@@ -732,6 +777,9 @@
                                     {{ bullet.text }}
                                 </div>
                                 {% endfor %}
+                                {% if entry.get('market_signal') %}
+                                <div class="market-signal">{{ entry.market_signal }}</div>
+                                {% endif %}
                             </div>
                         {% endif %}
                         {% endfor %}
@@ -878,10 +926,10 @@
                 el.scrollTop = currentScroll;
             }, intervalTime);
         }
-        setupAutoScroll('twitter-scroll');
-        setupAutoScroll('trump-scroll');
+        setupAutoScroll('think-tanks-scroll');
         setupAutoScroll('reuters-scroll');
         setupAutoScroll('toi-scroll');
+        setupAutoScroll('raw-feeds-scroll');
         setupAutoScroll('ai-scroll');
     </script>
 </body>

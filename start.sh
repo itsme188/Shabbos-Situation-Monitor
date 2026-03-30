@@ -75,13 +75,24 @@ if [ -n "$LOCAL_IP" ]; then
 fi
 echo ""
 echo "Press Ctrl+C to stop the server"
-echo "Server will auto-restart on crash."
+echo "Server will auto-restart on crash (max 10 rapid restarts)."
 echo "========================================"
 echo ""
 
+# Prevent macOS from sleeping while the monitor runs
+# -i = prevent idle sleep (keeps network active, display may dim)
+echo -e "${YELLOW}Preventing macOS sleep (caffeinate)...${NC}"
+caffeinate -i -w $$ &
+CAFFEINATE_PID=$!
+
 # Run the server with auto-restart on crash
 # Ctrl+C (SIGINT) exits the loop cleanly via the trap
-trap 'echo -e "\n${YELLOW}Shutting down...${NC}"; exit 0' INT TERM
+trap 'echo -e "\n${YELLOW}Shutting down...${NC}"; kill $CAFFEINATE_PID 2>/dev/null; exit 0' INT TERM
+
+# Crash-loop protection: max 10 restarts within 10 minutes
+MAX_RAPID_RESTARTS=10
+RAPID_WINDOW=600  # seconds
+RESTART_TIMES=()
 
 while true; do
     python3 server.py
@@ -90,16 +101,42 @@ while true; do
         echo -e "${GREEN}Server stopped cleanly.${NC}"
         break
     fi
+
+    # Track restart timestamps for crash-loop detection
+    NOW=$(date +%s)
+    RESTART_TIMES+=("$NOW")
+    # Remove timestamps older than the rapid window
+    CUTOFF=$((NOW - RAPID_WINDOW))
+    RECENT=()
+    for T in "${RESTART_TIMES[@]}"; do
+        if [ "$T" -ge "$CUTOFF" ]; then
+            RECENT+=("$T")
+        fi
+    done
+    RESTART_TIMES=("${RECENT[@]}")
+
+    if [ ${#RESTART_TIMES[@]} -ge $MAX_RAPID_RESTARTS ]; then
+        echo ""
+        echo -e "${RED}CRASH LOOP DETECTED: ${#RESTART_TIMES[@]} restarts in ${RAPID_WINDOW}s. Stopping.${NC}"
+        echo -e "${RED}Check server.log for the root cause, then restart manually.${NC}"
+        kill $CAFFEINATE_PID 2>/dev/null
+        exit 1
+    fi
+
     echo ""
-    echo -e "${RED}Server exited with code $EXIT_CODE. Restarting in 5 seconds...${NC}"
+    echo -e "${RED}Server exited with code $EXIT_CODE. Restarting in 5 seconds... (${#RESTART_TIMES[@]}/$MAX_RAPID_RESTARTS rapid restarts)${NC}"
     echo -e "${YELLOW}(Press Ctrl+C to stop)${NC}"
     sleep 5
     # Re-check port before restarting (another instance may have claimed it)
     EXISTING_PID=$(lsof -i :8080 -t 2>/dev/null)
     if [ -n "$EXISTING_PID" ]; then
         echo -e "${RED}Port 8080 now in use by PID $EXISTING_PID. Exiting restart loop.${NC}"
+        kill $CAFFEINATE_PID 2>/dev/null
         exit 1
     fi
     echo -e "${GREEN}Restarting server...${NC}"
     echo ""
 done
+
+# Clean up caffeinate
+kill $CAFFEINATE_PID 2>/dev/null

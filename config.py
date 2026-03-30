@@ -86,6 +86,11 @@ LOCATION_TZ = "America/New_York"
 CANDLE_LIGHTING_OFFSET = 18  # minutes before sunset
 HAVDALAH_OFFSET = 50         # minutes after Saturday sunset
 
+# Yom Tov mode: set to end datetime for extended holidays, None for normal Shabbos
+# Format: "YYYY-MM-DDTHH:MM" in ET. Shows "Yom Tov ends: ..." in header.
+# Set before Yom Tov, reset to None after.
+YOM_TOV_END = "2026-04-05T20:30"  # Pesach + Shabbos ends Sat night Apr 5
+
 # Cache persistence (survives server restarts)
 CACHE_FILE = "feed_cache.json"
 CACHE_MAX_AGE = 7200  # seconds (2 hours) - ignore cache files older than this
@@ -97,11 +102,39 @@ MAX_ITEMS_PER_FEED = 15
 REQUEST_TIMEOUT = 15  # seconds - general
 NITTER_TIMEOUT = 8    # seconds - shorter for Nitter (responds fast or not at all)
 
-# twikit authentication — not implemented yet (setup_twikit.py does not exist)
-# Kept as placeholder for potential future Twitter API integration
+# Think Tank Feeds — strategic analysis sources
+THINK_TANK_FEEDS = [
+    {
+        "name": "FDD",
+        "url": "https://www.fdd.org/feed/",
+        "type": "rss",  # Direct RSS with content:encoded for rich article bodies
+        "max_items": 8,
+    },
+    {
+        "name": "CSIS",
+        "url": "https://news.google.com/rss/search?q=site:csis.org+Iran+OR+Israel+OR+Middle+East&hl=en-US&gl=US&ceid=US:en",
+        "type": "google_news",
+        "max_items": 8,
+    },
+    {
+        "name": "ISW",
+        "url": "https://news.google.com/rss/search?q=site:understandingwar.org&hl=en-US&gl=US&ceid=US:en",
+        "type": "google_news",
+        "max_items": 5,
+    },
+]
 
 # AI Summary settings (requires ANTHROPIC_API_KEY environment variable)
-AI_SUMMARY_MAX_TOKENS = 1024
+AI_SUMMARY_MAX_TOKENS = 1500
+
+# Multi-day retention: how many days of AI summaries to keep
+# Set to 3 for 3-day Yom Tov, 1 for regular Shabbos
+AI_SUMMARY_RETENTION_DAYS = 3
+AI_SUMMARY_MAX_ENTRIES = 30  # ~8 summaries/day × 3 days + buffer
+
+# Inactivity timeout (seconds) — auto-pauses AI when nobody views dashboard
+# Disabled automatically when AI_SUMMARY_RETENTION_DAYS > 1 (Yom Tov mode)
+AI_INACTIVITY_TIMEOUT = 1800  # 30 minutes
 
 # Schedule (all hours in ET)
 AI_SUMMARY_MORNING_HOUR = 8                              # 8 AM ET - comprehensive morning summary
@@ -112,7 +145,7 @@ AI_SUMMARY_QUIET_HOURS = range(1, 8)                     # 1 AM - 7 AM: no summa
 AI_SUMMARY_MORNING_MODEL = "claude-opus-4-6"             # Best quality for morning summary
 AI_SUMMARY_REGULAR_MODEL = "claude-haiku-4-5-20251001"   # Fast/cheap for 2-hour summaries
 
-AI_SUMMARY_MORNING_PROMPT = """You are a concise news analyst monitoring the Middle East situation.
+AI_SUMMARY_MORNING_PROMPT = """You are a concise news analyst monitoring the Middle East situation with an eye on strategic implications and financial markets.
 Write a comprehensive summary of the key developments from the overnight period (roughly midnight to 8 AM ET).
 Rules:
 - Write 2-4 paragraphs in flowing prose (not bullet points)
@@ -120,11 +153,13 @@ Rules:
 - Note the overall trajectory: escalation, de-escalation, or stable
 - Highlight any breaking news that occurred while most US readers were asleep
 - Mention 3-5 most important developments
+- If think tank analysis articles are available, synthesize their strategic assessments into the narrative
 - All times should be in ET (Eastern Time) using Day H:MM AM/PM format (e.g., Sat 3:15 AM)
+- End with a short paragraph titled "Market Outlook:" covering potential stock market, oil, and defense sector implications of the overnight developments
 - If nothing significant happened overnight, say so briefly in one paragraph
 """
 
-AI_SUMMARY_REGULAR_PROMPT = """You are a concise news analyst monitoring the Middle East situation.
+AI_SUMMARY_REGULAR_PROMPT = """You are a concise news analyst monitoring the Middle East situation with an eye on strategic implications and financial markets.
 Analyze the provided feed data and produce a bullet-point summary of the key developments from the last 2 hours.
 Rules:
 - Maximum 8 bullet points
@@ -132,11 +167,15 @@ Rules:
 - Focus on NEW developments, not background
 - If multiple sources report the same event, note that
 - Highlight any escalation/de-escalation signals
+- If think tank analysis articles (from STRATEGIC ANALYSIS section) contain notable assessments, include them as [Strategic] bullets
 - Start each bullet with a category tag AND event time in ET: [Category] Day H:MM AM/PM - description
   Example: [Military] Fri 2:30 PM - IDF confirmed strikes on targets in southern Lebanon
   Example: [Breaking] Fri 7:45 PM - Al Jazeera reports Iranian retaliation underway
+  Example: [Strategic] Fri 3:00 PM - FDD analysis argues current escalation pattern mirrors 2024 April exchange
+  Example: [Markets] Fri 4:15 PM - Oil futures spike 3% on escalation fears
 - The current time context is provided at the top of the feed data
 - Convert all event times to ET (Eastern Time) for consistency
-- Valid categories: Military, Diplomatic, Political, Breaking, Markets
+- Valid categories: Military, Diplomatic, Political, Breaking, Markets, Strategic
+- After the bullets, add a single line: [Market Signal] followed by a one-sentence assessment of potential stock market, oil, or defense sector implications
 - If nothing significant is happening, say so briefly
 """

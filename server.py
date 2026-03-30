@@ -64,7 +64,6 @@ ai_summary_enabled = False  # Off by default — toggle on via dashboard to avoi
 
 # Inactivity tracking: auto-pause AI summaries if nobody views the dashboard
 _last_dashboard_view = None  # Set when someone loads the dashboard
-AI_INACTIVITY_TIMEOUT = 1800  # 30 minutes — pause AI after this long with no views
 
 from config import (
     HOST, PORT, DEBUG, REFRESH_INTERVAL,
@@ -84,6 +83,9 @@ from config import (
     AI_SUMMARY_MORNING_HOUR, AI_SUMMARY_REGULAR_HOURS, AI_SUMMARY_QUIET_HOURS,
     AI_SUMMARY_MORNING_MODEL, AI_SUMMARY_REGULAR_MODEL,
     AI_SUMMARY_MORNING_PROMPT, AI_SUMMARY_REGULAR_PROMPT,
+    AI_SUMMARY_RETENTION_DAYS, AI_SUMMARY_MAX_ENTRIES, AI_INACTIVITY_TIMEOUT,
+    THINK_TANK_FEEDS,
+    YOM_TOV_END,
 )
 
 # Setup logging with rotation
@@ -115,6 +117,7 @@ cache: Dict = {
     "trump": {"items": [], "last_updated": None, "error": None},
     "reuters": {"items": [], "last_updated": None, "error": None},
     "toi_liveblog": {"items": [], "last_updated": None, "error": None},
+    "think_tanks": {"items": [], "last_updated": None, "error": None},
     "ai_summary": {
         "items": [],
         "last_updated": None,
@@ -167,6 +170,7 @@ def save_cache_to_disk() -> None:
                     "schema_version": 1,
                     "feeds": serializable,
                     "backoff_state": backoff_state,
+                "ai_summary_enabled": ai_summary_enabled,
                 }, f)
             os.replace(tmp_path, CACHE_FILE)
         except Exception:
@@ -212,6 +216,11 @@ def load_cache_from_disk() -> bool:
                 loaded_count += 1
         # Restore backoff state so crash-restarts don't re-hammer rate-limited services
         _restore_backoff_state(data)
+        # Restore AI summary enabled state so crash-restarts don't lose the toggle
+        global ai_summary_enabled
+        if data.get("ai_summary_enabled") is not None:
+            ai_summary_enabled = data["ai_summary_enabled"]
+            logger.info(f"Restored AI summary enabled state: {ai_summary_enabled}")
         # Prune AI summaries from previous days
         _prune_old_summaries()
         logger.info(f"Loaded {loaded_count} feeds from disk cache ({age/60:.1f}m old)")
@@ -1244,12 +1253,86 @@ def parse_toi_liveblog(soup, source_url: str = "") -> List[Dict]:
     return items
 
 
+# ============ THINK TANK FETCHER ============
+
+def fetch_think_tanks() -> None:
+    """Fetch strategic analysis articles from think tank RSS feeds (FDD, CSIS, ISW)."""
+    logger.info("Fetching think tank articles...")
+    all_items = []
+    errors = []
+
+    for feed_def in THINK_TANK_FEEDS:
+        try:
+            response = safe_request(feed_def["url"], raise_on_429=True)
+        except RateLimitError:
+            errors.append(f"{feed_def['name']}: rate limited")
+            continue
+
+        if not response:
+            errors.append(f"{feed_def['name']}: no response")
+            continue
+
+        try:
+            feed = feedparser.parse(response.content)
+        except Exception as e:
+            errors.append(f"{feed_def['name']}: parse error: {e}")
+            continue
+
+        for entry in feed.entries[:feed_def["max_items"]]:
+            # For direct RSS (FDD): use content:encoded if available (richer than summary)
+            content = ""
+            if feed_def["type"] == "rss" and entry.get("content"):
+                content = clean_html(entry["content"][0].get("value", ""))[:500]
+            elif entry.get("summary"):
+                content = clean_html(entry["summary"])[:300]
+
+            # Extract source from Google News title format: "Title - Source"
+            title = entry.get("title", "")
+            source = feed_def["name"]
+            if feed_def["type"] == "google_news" and " - " in title:
+                title, source = title.rsplit(" - ", 1)
+
+            ts_display = format_timestamp(entry.get("published", ""))
+
+            all_items.append({
+                "title": title.strip(),
+                "summary": content,
+                "timestamp": entry.get("published", ""),
+                "timestamp_display": ts_display,
+                "link": entry.get("link", ""),
+                "source": source.strip(),
+                "author": entry.get("author", entry.get("dc_creator", "")),
+            })
+
+    if all_items:
+        # Sort by timestamp (newest first)
+        all_items.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+        all_items = all_items[:MAX_ITEMS_PER_FEED]
+        cache["think_tanks"] = {
+            "items": all_items,
+            "last_updated": datetime.now(),
+            "error": "; ".join(errors) if errors else None,
+        }
+        logger.info(f"Think tanks: fetched {len(all_items)} articles ({'; '.join(errors)}" if errors else f"Think tanks: fetched {len(all_items)} articles")
+    elif errors:
+        # Preserve last-good items on total failure
+        if not cache["think_tanks"]["items"]:
+            cache["think_tanks"]["error"] = "; ".join(errors)
+        logger.warning(f"Think tanks: all sources failed: {'; '.join(errors)}")
+
+
 # ============ AI SUMMARY FETCHER ============
 
 
-def _parse_ai_bullets(summary_text: str) -> List[Dict]:
-    """Parse AI-generated summary text into structured bullet points."""
+def _parse_ai_bullets(summary_text: str) -> tuple:
+    """Parse AI-generated summary text into structured bullet points.
+
+    Returns:
+        (bullets, market_signal): bullets is a list of dicts, market_signal is
+        a string (or None) extracted from the [Market Signal] line.
+    """
     bullets = []
+    market_signal = None
     time_pattern = re.compile(r'^\[([^\]]+)\]\s*(?:[A-Z][a-z]{2}\s+)?(\d{1,2}:\d{2}(?:\s*[AaPp][Mm])?)\s*[-\u2013\u2014]\s*(.+)$')
     gen_time = datetime.now(ZoneInfo("America/New_York")).strftime("%a %-I:%M %p")
 
@@ -1259,6 +1342,11 @@ def _parse_ai_bullets(summary_text: str) -> List[Dict]:
             continue
         cleaned = line.lstrip("-*\u2022 ").strip()
         if not cleaned:
+            continue
+
+        # Extract [Market Signal] line separately
+        if cleaned.startswith("[Market Signal]"):
+            market_signal = cleaned.replace("[Market Signal]", "").strip().lstrip(":-–— ").strip()
             continue
 
         match = time_pattern.match(cleaned)
@@ -1294,14 +1382,15 @@ def _parse_ai_bullets(summary_text: str) -> List[Dict]:
             return display_str  # Old 24hr format still sorts ok
 
     bullets.sort(key=lambda b: _sort_key_for_time(b.get("timestamp_display", "99:99")))
-    return bullets
+    return bullets, market_signal
 
 
 def _prune_old_summaries() -> None:
-    """Remove AI summaries not from today (ET timezone).
+    """Remove AI summaries older than AI_SUMMARY_RETENTION_DAYS (ET timezone).
 
     Called at startup, before generation, and on dashboard load to ensure
-    stale entries from previous days never accumulate or display.
+    stale entries beyond the retention window never accumulate or display.
+    Retention of 1 = today only (regular Shabbos). Retention of 3 = 3-day Yom Tov.
     """
     today_et = datetime.now(ZoneInfo("America/New_York")).date()
 
@@ -1313,27 +1402,27 @@ def _prune_old_summaries() -> None:
                 gen_dt = datetime.fromisoformat(entry.get("generated_at", ""))
                 # generated_at is naive server-local time (ET)
                 gen_date = gen_dt.date()
-                if gen_date == today_et:
+                if (today_et - gen_date).days < AI_SUMMARY_RETENTION_DAYS:
                     filtered.append(entry)
             except (ValueError, TypeError):
                 filtered.append(entry)  # Keep unparseable entries (defensive)
 
         if len(filtered) < len(summaries):
-            logger.info(f"Pruned {len(summaries) - len(filtered)} old AI summaries (keeping {len(filtered)} from today)")
+            logger.info(f"Pruned {len(summaries) - len(filtered)} old AI summaries (keeping {len(filtered)} within {AI_SUMMARY_RETENTION_DAYS}-day window)")
             cache["ai_summary"]["summaries"] = filtered
 
-    # Clear morning summary if from a previous day
+    # Clear morning summary if outside retention window
     morning = cache["ai_summary"].get("morning_summary")
     if morning:
         try:
             gen_dt = datetime.fromisoformat(morning.get("generated_at", ""))
-            if gen_dt.date() != today_et:
+            if (today_et - gen_dt.date()).days >= AI_SUMMARY_RETENTION_DAYS:
                 cache["ai_summary"]["morning_summary"] = None
                 logger.info(f"Cleared stale morning summary from {gen_dt.date()}")
         except (ValueError, TypeError):
             pass
 
-    # Clear items array if no summaries remain for today
+    # Clear items array if no summaries remain
     if not cache["ai_summary"].get("summaries"):
         cache["ai_summary"]["items"] = []
 
@@ -1355,7 +1444,15 @@ def _build_feed_digest() -> str:
         if not items:
             continue
 
-        feed_text_parts.append(f"\n--- {feed_name.upper()} ---")
+        # Label sections distinctly so the LLM knows the source type
+        label_map = {
+            "think_tanks": "STRATEGIC ANALYSIS (Think Tanks — FDD, CSIS, ISW)",
+            "twitter_list": "OSINT FEEDS",
+            "trump": "TRUMP STATEMENTS",
+            "reuters": "MIDDLE EAST NEWS",
+            "toi_liveblog": "TIMES OF ISRAEL",
+        }
+        feed_text_parts.append(f"\n--- {label_map.get(feed_name, feed_name.upper())} ---")
         for item in items[:10]:
             parts = []
             if item.get("author"):
@@ -1421,7 +1518,7 @@ def _generate_morning_summary(api_key: str) -> None:
             # Also prepend to summaries list for history
             summaries = cache["ai_summary"].get("summaries", [])
             summaries.insert(0, morning_entry)
-            cache["ai_summary"]["summaries"] = summaries[:14]
+            cache["ai_summary"]["summaries"] = summaries[:AI_SUMMARY_MAX_ENTRIES]
 
             cache["ai_summary"]["items"] = []
             cache["ai_summary"]["last_updated"] = gen_time
@@ -1479,7 +1576,7 @@ def _generate_regular_summary(api_key: str) -> None:
             )
 
             summary_text = message.content[0].text
-            bullets = _parse_ai_bullets(summary_text)
+            bullets, market_signal = _parse_ai_bullets(summary_text)
 
             gen_time = datetime.now()
             gen_et = datetime.now(ZoneInfo("America/New_York"))
@@ -1492,11 +1589,12 @@ def _generate_regular_summary(api_key: str) -> None:
                 "generated_at_display": gen_et.strftime("%a %-I:%M %p ET"),
                 "hour_label": f"{hour_start.strftime('%-I:%M')}-{hour_end.strftime('%-I:%M %p')} ET",
                 "bullets": bullets,
+                "market_signal": market_signal,
             }
 
             summaries = cache["ai_summary"].get("summaries", [])
             summaries.insert(0, summary_entry)
-            cache["ai_summary"]["summaries"] = summaries[:14]
+            cache["ai_summary"]["summaries"] = summaries[:AI_SUMMARY_MAX_ENTRIES]
 
             cache["ai_summary"]["items"] = bullets
             cache["ai_summary"]["last_updated"] = gen_time
@@ -1541,7 +1639,8 @@ def fetch_ai_summary(force: bool = False) -> None:
         return
 
     # Auto-pause if nobody has viewed the dashboard recently
-    if _last_dashboard_view is not None:
+    # Skip during multi-day Yom Tov mode — nobody views dashboard but summaries must keep generating
+    if AI_SUMMARY_RETENTION_DAYS <= 1 and _last_dashboard_view is not None:
         idle_seconds = (datetime.now() - _last_dashboard_view).total_seconds()
         if idle_seconds > AI_INACTIVITY_TIMEOUT:
             ai_summary_enabled = False
@@ -1596,19 +1695,29 @@ def update_all_feeds() -> None:
         "trump": fetch_trump,
         "reuters": fetch_reuters,
         "toi": fetch_toi,
+        "think_tanks": fetch_think_tanks,
     }
 
-    with ThreadPoolExecutor(max_workers=4) as executor:
+    with ThreadPoolExecutor(max_workers=5) as executor:
         futures = {
             executor.submit(fn): name
             for name, fn in fetchers.items()
         }
-        for future in as_completed(futures, timeout=120):
-            name = futures[future]
-            try:
-                future.result()
-            except Exception as e:
-                logger.error(f"Fetcher {name} raised exception: {e}")
+        completed_names = set()
+        try:
+            for future in as_completed(futures, timeout=120):
+                name = futures[future]
+                completed_names.add(name)
+                try:
+                    future.result()
+                except Exception as e:
+                    logger.error(f"Fetcher {name} raised exception: {e}")
+        except TimeoutError:
+            timed_out = [name for f, name in futures.items() if name not in completed_names]
+            logger.error(f"Feed update timed out after 120s. Timed-out fetchers: {', '.join(timed_out)}")
+            # Cancel remaining futures (best-effort — running threads can't be interrupted)
+            for f in futures:
+                f.cancel()
 
     elapsed = (datetime.now() - start).total_seconds()
     logger.info(f"Feed update cycle complete in {elapsed:.1f}s")
@@ -1634,15 +1743,36 @@ def dashboard():
     except Exception as e:
         logger.debug(f"Shabbos times computation failed: {e}")
 
+    # Compute Yom Tov end display string
+    yom_tov_end_display = None
+    if YOM_TOV_END:
+        try:
+            yt_dt = datetime.fromisoformat(YOM_TOV_END)
+            yom_tov_end_display = yt_dt.strftime("%a %-I:%M %p")
+        except (ValueError, TypeError):
+            yom_tov_end_display = YOM_TOV_END  # Fallback to raw string
+
+    # Merge OSINT + Trump feeds into a single "Raw Feeds" list, sorted by timestamp
+    raw_items = []
+    for item in cache["twitter_list"]["items"][:10]:
+        raw_items.append({**item, "feed_source": "osint"})
+    for item in cache["trump"]["items"][:8]:
+        raw_items.append({**item, "feed_source": "trump"})
+    # Sort by timestamp descending (newest first) — ISO strings sort lexicographically
+    raw_items.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+
     return render_template(
         "index.html",
         cache=cache,
+        merged_raw_feeds=raw_items,
         generated_at=datetime.now(),
         refresh_interval=REFRESH_INTERVAL,
         shabbos_times=shabbos_times,
         ai_summary_enabled=ai_summary_enabled,
         has_anthropic=HAS_ANTHROPIC,
         has_api_key=bool(os.environ.get("ANTHROPIC_API_KEY")),
+        yom_tov_end=YOM_TOV_END,
+        yom_tov_end_display=yom_tov_end_display,
     )
 
 
