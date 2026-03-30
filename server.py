@@ -324,6 +324,178 @@ def is_shabbos() -> bool:
     return times["candle_lighting"] <= now <= times["havdalah"]
 
 
+# ============ YOM TOV DETECTION (HEBCAL API) ============
+
+# Cache Hebcal results: {(year, month): {"fetched_at": datetime, "items": [...]}}
+_hebcal_cache: Dict[tuple, Dict] = {}
+_HEBCAL_CACHE_TTL = 86400  # 24 hours — holiday dates don't change
+
+
+def _fetch_hebcal_events(year: int, month: int) -> list:
+    """Fetch holiday and candle/havdalah events from Hebcal API for a given month."""
+    cache_key = (year, month)
+    cached = _hebcal_cache.get(cache_key)
+    if cached and (datetime.now() - cached["fetched_at"]).total_seconds() < _HEBCAL_CACHE_TTL:
+        return cached["items"]
+
+    try:
+        params = {
+            "cfg": "json", "v": "1",
+            "maj": "on", "min": "off", "mod": "off", "nx": "off",
+            "ss": "off", "mf": "off", "c": "on", "M": "on",
+            "geo": "pos",
+            "latitude": str(LOCATION_LAT),
+            "longitude": str(LOCATION_LON),
+            "tzid": LOCATION_TZ,
+            "year": str(year),
+            "month": str(month),
+            "b": str(CANDLE_LIGHTING_OFFSET),
+        }
+        response = safe_request(
+            "https://www.hebcal.com/hebcal?" + "&".join(f"{k}={v}" for k, v in params.items())
+        )
+        if not response:
+            return []
+        data = response.json()
+        items = data.get("items", [])
+        _hebcal_cache[cache_key] = {"fetched_at": datetime.now(), "items": items}
+        logger.info(f"Hebcal: fetched {len(items)} events for {year}-{month:02d}")
+        return items
+    except Exception as e:
+        logger.warning(f"Hebcal API failed: {e}")
+        return []
+
+
+def get_yom_tov_info() -> Dict:
+    """Detect if we're currently in a Yom Tov period or one is upcoming within 7 days.
+
+    Queries the Hebcal API for the current and next month, finds multi-day
+    holiday windows (candle lighting → havdalah sequences that span 2+ days),
+    and returns the relevant info.
+
+    Returns dict with keys:
+        active: bool — are we currently in a Yom Tov window?
+        name: str — holiday name (e.g. "Pesach")
+        candle_lighting: datetime — when Yom Tov starts
+        havdalah: datetime — when Yom Tov ends
+        havdalah_display: str — e.g. "Sat 8:05 PM"
+        days: int — number of days in this Yom Tov block
+        retention_days: int — recommended AI_SUMMARY_RETENTION_DAYS
+    Or None if no Yom Tov is active/upcoming.
+    """
+    now = datetime.now(_tz)
+    today = now.date()
+
+    # Fetch events for this month and next month (in case Yom Tov spans month boundary)
+    events = _fetch_hebcal_events(today.year, today.month)
+    next_month = today.month + 1
+    next_year = today.year
+    if next_month > 12:
+        next_month = 1
+        next_year += 1
+    events += _fetch_hebcal_events(next_year, next_month)
+
+    if not events:
+        return None
+
+    # Build timeline: extract candle lighting and havdalah events with their datetimes
+    candles = []  # [(datetime, title)]
+    havdalahs = []  # [(datetime, title)]
+    holidays = {}  # {date_str: holiday_name}
+
+    for ev in events:
+        cat = ev.get("category", "")
+        date_str = ev.get("date", "")
+        title = ev.get("title", "")
+
+        if cat == "holiday" and "CH''M" not in title and "Erev" not in title:
+            # Track actual Yom Tov days (not Chol HaMoed, not Erev)
+            holidays[date_str[:10]] = title.split("(")[0].strip()  # "Pesach I" → "Pesach I"
+        elif cat == "candles" and "T" in date_str:
+            try:
+                dt = datetime.fromisoformat(date_str)
+                candles.append((dt, title))
+            except ValueError:
+                pass
+        elif cat == "havdalah" and "T" in date_str:
+            try:
+                dt = datetime.fromisoformat(date_str)
+                havdalahs.append((dt, title))
+            except ValueError:
+                pass
+
+    # Find Yom Tov windows: sequences of candle→candle→...→havdalah
+    # A multi-day Yom Tov has candle lightings on consecutive nights before a havdalah
+    # Sort all events chronologically
+    all_events = [(dt, "candle", t) for dt, t in candles] + [(dt, "havdalah", t) for dt, t in havdalahs]
+    all_events.sort(key=lambda x: x[0])
+
+    # Find windows: a window starts with a candle event and ends at the next havdalah
+    windows = []
+    window_start = None
+    window_candles = 0
+
+    for dt, etype, title in all_events:
+        if etype == "candle":
+            if window_start is None:
+                window_start = dt
+            window_candles += 1
+        elif etype == "havdalah" and window_start is not None:
+            # This havdalah closes the window
+            days = (dt.date() - window_start.date()).days + 1
+
+            # Find the holiday name from the dates in this window
+            holiday_name = ""
+            check_date = window_start.date()
+            while check_date <= dt.date():
+                name = holidays.get(check_date.isoformat())
+                if name:
+                    # Extract base name (e.g., "Pesach I" → "Pesach")
+                    base = name.split()[0] if name else ""
+                    if base and base not in ("Shabbat",):
+                        holiday_name = base
+                        break
+                check_date += timedelta(days=1)
+
+            # Only track multi-day windows (2+ days) or windows with a holiday name
+            if days >= 2 or holiday_name:
+                windows.append({
+                    "name": holiday_name or "Shabbos",
+                    "candle_lighting": window_start,
+                    "havdalah": dt,
+                    "days": days,
+                })
+            window_start = None
+            window_candles = 0
+
+    # Find the most relevant window: currently active or upcoming within 7 days
+    for w in windows:
+        if w["candle_lighting"] <= now <= w["havdalah"]:
+            # Currently in this Yom Tov
+            return {
+                "active": True,
+                "name": w["name"],
+                "candle_lighting": w["candle_lighting"],
+                "havdalah": w["havdalah"],
+                "havdalah_display": w["havdalah"].strftime("%a %-I:%M %p"),
+                "days": w["days"],
+                "retention_days": w["days"],
+            }
+        elif now < w["candle_lighting"] and (w["candle_lighting"] - now).days <= 7:
+            # Upcoming within 7 days
+            return {
+                "active": False,
+                "name": w["name"],
+                "candle_lighting": w["candle_lighting"],
+                "havdalah": w["havdalah"],
+                "havdalah_display": w["havdalah"].strftime("%a %-I:%M %p"),
+                "days": w["days"],
+                "retention_days": w["days"],
+            }
+
+    return None
+
+
 # Nitter instance health tracking
 nitter_health: Dict[str, Dict] = {
     instance: {"failures": 0, "last_success": None, "last_failure": None}
@@ -1541,12 +1713,13 @@ def _parse_ai_bullets(summary_text: str) -> tuple:
 
 
 def _prune_old_summaries() -> None:
-    """Remove AI summaries older than AI_SUMMARY_RETENTION_DAYS (ET timezone).
+    """Remove AI summaries older than the effective retention window (ET timezone).
 
     Called at startup, before generation, and on dashboard load to ensure
     stale entries beyond the retention window never accumulate or display.
-    Retention of 1 = today only (regular Shabbos). Retention of 3 = 3-day Yom Tov.
+    Retention is dynamic: 1 day normally, auto-extended during Yom Tov via Hebcal.
     """
+    retention = _effective_retention_days()
     today_et = datetime.now(ZoneInfo("America/New_York")).date()
 
     summaries = cache["ai_summary"].get("summaries", [])
@@ -1557,13 +1730,13 @@ def _prune_old_summaries() -> None:
                 gen_dt = datetime.fromisoformat(entry.get("generated_at", ""))
                 # generated_at is naive server-local time (ET)
                 gen_date = gen_dt.date()
-                if (today_et - gen_date).days < AI_SUMMARY_RETENTION_DAYS:
+                if (today_et - gen_date).days < retention:
                     filtered.append(entry)
             except (ValueError, TypeError):
                 filtered.append(entry)  # Keep unparseable entries (defensive)
 
         if len(filtered) < len(summaries):
-            logger.info(f"Pruned {len(summaries) - len(filtered)} old AI summaries (keeping {len(filtered)} within {AI_SUMMARY_RETENTION_DAYS}-day window)")
+            logger.info(f"Pruned {len(summaries) - len(filtered)} old AI summaries (keeping {len(filtered)} within {retention}-day window)")
             cache["ai_summary"]["summaries"] = filtered
 
     # Clear morning summary if outside retention window
@@ -1571,7 +1744,7 @@ def _prune_old_summaries() -> None:
     if morning:
         try:
             gen_dt = datetime.fromisoformat(morning.get("generated_at", ""))
-            if (today_et - gen_dt.date()).days >= AI_SUMMARY_RETENTION_DAYS:
+            if (today_et - gen_dt.date()).days >= retention:
                 cache["ai_summary"]["morning_summary"] = None
                 logger.info(f"Cleared stale morning summary from {gen_dt.date()}")
         except (ValueError, TypeError):
@@ -1779,6 +1952,23 @@ def _generate_regular_summary(api_key: str) -> None:
             return  # Unknown error — don't retry
 
 
+def _effective_retention_days() -> int:
+    """Return the effective AI summary retention days.
+
+    Uses config value, but also checks Hebcal for active Yom Tov —
+    if we're in a multi-day holiday, automatically extends retention.
+    """
+    if AI_SUMMARY_RETENTION_DAYS > 1:
+        return AI_SUMMARY_RETENTION_DAYS  # Manual override takes precedence
+    try:
+        yt = get_yom_tov_info()
+        if yt and yt.get("active") and yt.get("days", 1) > 1:
+            return yt["days"]
+    except Exception:
+        pass
+    return AI_SUMMARY_RETENTION_DAYS
+
+
 def fetch_ai_summary(force: bool = False) -> None:
     """Generate AI summary based on time-of-day schedule.
 
@@ -1795,7 +1985,8 @@ def fetch_ai_summary(force: bool = False) -> None:
 
     # Auto-pause if nobody has viewed the dashboard recently
     # Skip during multi-day Yom Tov mode — nobody views dashboard but summaries must keep generating
-    if AI_SUMMARY_RETENTION_DAYS <= 1 and _last_dashboard_view is not None:
+    retention = _effective_retention_days()
+    if retention <= 1 and _last_dashboard_view is not None:
         idle_seconds = (datetime.now() - _last_dashboard_view).total_seconds()
         if idle_seconds > AI_INACTIVITY_TIMEOUT:
             ai_summary_enabled = False
@@ -1898,14 +2089,25 @@ def dashboard():
     except Exception as e:
         logger.debug(f"Shabbos times computation failed: {e}")
 
-    # Compute Yom Tov end display string
+    # Detect Yom Tov from Hebcal API (or use manual override from config)
+    yom_tov_info = None
     yom_tov_end_display = None
     if YOM_TOV_END:
+        # Manual override from config.py
         try:
             yt_dt = datetime.fromisoformat(YOM_TOV_END)
             yom_tov_end_display = yt_dt.strftime("%a %-I:%M %p")
+            yom_tov_info = {"active": True, "name": "Yom Tov"}
         except (ValueError, TypeError):
-            yom_tov_end_display = YOM_TOV_END  # Fallback to raw string
+            yom_tov_end_display = YOM_TOV_END
+    else:
+        # Auto-detect from Hebcal
+        try:
+            yom_tov_info = get_yom_tov_info()
+            if yom_tov_info:
+                yom_tov_end_display = yom_tov_info["havdalah_display"]
+        except Exception as e:
+            logger.debug(f"Yom Tov detection failed: {e}")
 
     # Merge OSINT + Trump feeds into a single "Raw Feeds" list, sorted by timestamp
     raw_items = []
@@ -1926,7 +2128,8 @@ def dashboard():
         ai_summary_enabled=ai_summary_enabled,
         has_anthropic=HAS_ANTHROPIC,
         has_api_key=bool(os.environ.get("ANTHROPIC_API_KEY")),
-        yom_tov_end=YOM_TOV_END,
+        yom_tov_end=YOM_TOV_END or (yom_tov_info is not None),
+        yom_tov_info=yom_tov_info,
         yom_tov_end_display=yom_tov_end_display,
     )
 

@@ -543,9 +543,13 @@
             <span class="status-item" style="margin-left: 0.5rem; padding-left: 1rem; border-left: 1px solid var(--border);">
                 {{ generated_at.strftime('%a %-I:%M %p') }}
             </span>
-            {% if yom_tov_end %}
+            {% if yom_tov_info %}
             <span class="status-item" style="margin-left: 0.25rem; color: var(--text-muted); font-size: 0.7rem;">
-                Yom Tov ends {{ yom_tov_end_display }}
+                {% if yom_tov_info.active %}
+                    {{ yom_tov_info.name or 'Yom Tov' }} ends {{ yom_tov_end_display }}
+                {% else %}
+                    {{ yom_tov_info.name or 'Yom Tov' }} · candles {{ yom_tov_info.candle_lighting.strftime('%-I:%M %p %a') }}
+                {% endif %}
             </span>
             {% elif shabbos_times %}
             <span class="status-item" style="margin-left: 0.25rem; color: var(--text-muted); font-size: 0.7rem;">
