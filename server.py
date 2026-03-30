@@ -69,7 +69,7 @@ _last_dashboard_view = None  # Set when someone loads the dashboard
 _last_candle_lighting_summary_date = None
 
 from config import (
-    HOST, PORT, DEBUG, REFRESH_INTERVAL,
+    HOST, PORT, DEBUG, REFRESH_INTERVAL, REFRESH_INTERVAL_YOM_TOV,
     TWITTER_ACCOUNTS, TRUMP_TRUTH_RSS, TRUMP_TWITTER_MIRROR,
     REUTERS_MIDEAST_RSS, REUTERS_FALLBACK_RSS,
     NITTER_INSTANCES, NITTER_TIMEOUT, TOI_RSS_URL, TOI_LIVEBLOG_URL,
@@ -2322,6 +2322,18 @@ def update_all_feeds() -> None:
 
     # Persist cache to disk after every update cycle
     save_cache_to_disk()
+
+    # Dynamically adjust refresh interval: 15 min during Yom Tov, 10 min otherwise
+    try:
+        yt = get_yom_tov_info()
+        is_yom_tov = yt and yt.get("active") and not is_shabbos()
+        desired = REFRESH_INTERVAL_YOM_TOV if is_yom_tov else REFRESH_INTERVAL
+        job = scheduler.get_job("feed_updater")
+        if job and job.trigger.interval.total_seconds() != desired:
+            scheduler.reschedule_job("feed_updater", trigger="interval", seconds=desired)
+            logger.info(f"Refresh interval changed to {desired // 60} min ({'Yom Tov' if is_yom_tov else 'normal'})")
+    except Exception as e:
+        logger.debug(f"Refresh interval check failed: {e}")
 
     logger.info("=" * 50)
 

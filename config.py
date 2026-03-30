@@ -10,7 +10,8 @@ PORT = 8080
 DEBUG = False
 
 # Refresh interval (seconds)
-REFRESH_INTERVAL = 600  # 10 minutes
+REFRESH_INTERVAL = 600       # 10 minutes (normal / Shabbos)
+REFRESH_INTERVAL_YOM_TOV = 900  # 15 minutes (Yom Tov — longer to conserve resources)
 
 # OSINT Accounts to Monitor (fetched via Twitter/Nitter/BlueSky fallback chain)
 TWITTER_ACCOUNTS = [
