@@ -78,9 +78,9 @@
 - **Two-model strategy**: Haiku for regular 2-hour summaries (fast/cheap), Opus for morning summary (best quality)
 - Prompt requires `[Category] Day H:MM AM/PM - description` format. Parser regex handles both old 24-hour and new AM/PM formats, dash variants `[-–—]`
 - All times in ET. Feed digest includes timezone context header for the LLM
-- Valid categories: Military, Diplomatic, Political, Breaking, Markets, Strategic
-- Each regular summary includes a `[Market Signal]` line — one-sentence market implications
-- `_parse_ai_bullets()` returns `(bullets, market_signal)` tuple
+- Valid categories: Military, Diplomatic, Political, Breaking, Strategic
+- `_parse_ai_bullets()` returns a list of bullet dicts
+- **Oil price as background signal**: WTI crude price fetched via Yahoo Finance chart API each cycle. Not displayed in UI. Fed to LLM in a hidden context section so it can gauge event significance (large oil moves = markets reacting, flat = noise/priced in). No explicit market/financial copy in output.
 - Cache fields: `summaries[]`, `morning_summary`, `ai_summary_enabled` — all persisted to `feed_cache.json`
 - Manual refresh (`/api/refresh-ai`) uses `force=True` to bypass schedule check
 - **Yom Tov mode** (`AI_SUMMARY_RETENTION_DAYS > 1`): keeps N days of summaries, disables auto-pause, increases cap to `AI_SUMMARY_MAX_ENTRIES` (30). Day separators in template for multi-day viewing.

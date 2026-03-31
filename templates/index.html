@@ -165,16 +165,6 @@
             border: 1px solid var(--border-light);
         }
 
-        .market-signal {
-            padding: 0.4rem 0.75rem;
-            margin-top: 0.25rem;
-            font-size: 0.75rem;
-            font-style: italic;
-            color: var(--accent-clay);
-            border-left: 2px solid var(--accent-clay);
-            background: #fef9ec;
-        }
-
         .day-separator {
             text-align: center;
             padding: 0.4rem;
@@ -781,9 +771,6 @@
                                     {{ bullet.text }}
                                 </div>
                                 {% endfor %}
-                                {% if entry.get('market_signal') %}
-                                <div class="market-signal">{{ entry.market_signal }}</div>
-                                {% endif %}
                             </div>
                         {% endif %}
                         {% endfor %}

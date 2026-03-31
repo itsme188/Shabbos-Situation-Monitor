@@ -167,6 +167,11 @@ PREDICTION_MARKETS = [
 ]
 AI_SUMMARY_MARKET_THRESHOLD = 5  # min percentage-point change to mention in summary
 
+# Oil price context — background signal for AI summary significance weighting
+# Fetched via Yahoo Finance chart API (no API key, no extra dependency)
+OIL_TICKER = "CL=F"   # WTI Crude Futures (NYMEX)
+OIL_FETCH_TIMEOUT = 10  # seconds
+
 # AI Summary settings (requires ANTHROPIC_API_KEY environment variable)
 AI_SUMMARY_MAX_TOKENS = 1500
 
@@ -188,7 +193,7 @@ AI_SUMMARY_QUIET_HOURS = range(1, 8)                     # 1 AM - 7 AM: no summa
 AI_SUMMARY_MORNING_MODEL = "claude-opus-4-6"             # Best quality for morning summary
 AI_SUMMARY_REGULAR_MODEL = "claude-haiku-4-5-20251001"   # Fast/cheap for 2-hour summaries
 
-AI_SUMMARY_MORNING_PROMPT = """You are a concise news analyst monitoring the Middle East situation with an eye on strategic implications and financial markets.
+AI_SUMMARY_MORNING_PROMPT = """You are a concise news analyst monitoring the Middle East situation.
 Write a comprehensive summary of the key developments from the overnight period (roughly midnight to 8 AM ET).
 Rules:
 - Write 2-4 paragraphs in flowing prose (not bullet points)
@@ -199,11 +204,11 @@ Rules:
 - If think tank analysis articles are available, synthesize their strategic assessments into the narrative
 - All times should be in ET (Eastern Time) using Day H:MM AM/PM format (e.g., Sat 3:15 AM)
 - If prediction market odds are provided, mention any that shifted meaningfully (5+ percentage points) — these reflect how betting markets assess the probability of key events
-- End with a short paragraph titled "Market Outlook:" covering potential stock market, oil, and defense sector implications of the overnight developments
+- If oil market context is provided, use it to calibrate how significant events are (large price moves = markets reacting), but NEVER mention oil prices, market data, or financial implications in your output
 - If nothing significant happened overnight, say so briefly in one paragraph
 """
 
-AI_SUMMARY_REGULAR_PROMPT = """You are a concise news analyst monitoring the Middle East situation with an eye on strategic implications and financial markets.
+AI_SUMMARY_REGULAR_PROMPT = """You are a concise news analyst monitoring the Middle East situation.
 Analyze the provided feed data and produce a bullet-point summary of the key developments from the last 2 hours.
 Rules:
 - Maximum 8 bullet points
@@ -216,11 +221,10 @@ Rules:
   Example: [Military] Fri 2:30 PM - IDF confirmed strikes on targets in southern Lebanon
   Example: [Breaking] Fri 7:45 PM - Al Jazeera reports Iranian retaliation underway
   Example: [Strategic] Fri 3:00 PM - FDD analysis argues current escalation pattern mirrors 2024 April exchange
-  Example: [Markets] Fri 4:15 PM - Oil futures spike 3% on escalation fears
 - The current time context is provided at the top of the feed data
 - Convert all event times to ET (Eastern Time) for consistency
-- Valid categories: Military, Diplomatic, Political, Breaking, Markets, Strategic
-- After the bullets, add a single line: [Market Signal] followed by a one-sentence assessment of potential stock market, oil, or defense sector implications
+- Valid categories: Military, Diplomatic, Political, Breaking, Strategic
+- If oil market context is provided, use it to calibrate how significant events are (large price moves = markets reacting), but NEVER mention oil prices, market data, or financial implications in your output
 - If nothing significant is happening, say so briefly
 """
 
@@ -233,5 +237,6 @@ Rules:
 - If prediction market odds are provided, mention any that shifted meaningfully (5+ percentage points)
 - If think tank analysis articles are available, note key strategic assessments
 - All times should be in ET (Eastern Time) using Day H:MM AM/PM format
+- If oil market context is provided, use it to calibrate how significant events are (large price moves = markets reacting), but NEVER mention oil prices, market data, or financial implications in your output
 - Keep it concise — this is a quick status check before Shabbos begins
 """

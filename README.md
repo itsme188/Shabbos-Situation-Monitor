@@ -14,7 +14,7 @@ A hands-free, auto-refreshing local dashboard for monitoring Iran/Israel/Middle 
 
 - **Strategic Analysis** — Think tank articles from FDD (RSS), CSIS, and ISW (direct scraping) with per-article AI summaries via Claude Haiku
 - **AI Summary** — Schedule-aware generation: morning summary (Opus, prose), 2-hour bullet summaries (Haiku), candle-lighting summary (Opus, fires automatically at candle lighting time)
-- **Market Lens** — Each AI summary includes a `[Market Signal]` line assessing stock/oil/defense implications. `[Strategic]` category for think tank insights.
+- **Oil Price Signal** — WTI crude price fetched as a hidden background signal to help the AI gauge event significance (price moves = markets reacting vs. noise). Never shown to the reader.
 - **Prediction Markets** — Polymarket odds for Iran risk scenarios (Nuclear Deal, US Forces, Ground Invasion, Ceasefire) fed into AI prompts
 - **OSINT Feeds** — 11 Twitter/X accounts via 5-tier fallback (syndication, TwStalker, BlueSky, Nitter, Google News)
 - **Yom Tov Detection** — Hebcal API auto-detects holiday dates, extends AI summary retention, disables auto-pause, adjusts refresh interval (15 min vs 10 min)
@@ -57,10 +57,10 @@ An AppleScript launcher app is included for one-click startup from the Desktop.
 |------|------|-------|---------|
 | 1-7 AM | Quiet hours | — | No generation |
 | 8 AM | Morning summary | Opus | Multi-paragraph prose covering overnight |
-| 10 AM - 12 AM | 2-hour summaries | Haiku | 8 bullets max + `[Market Signal]` line |
+| 10 AM - 12 AM | 2-hour summaries | Haiku | 8 bullets max |
 | Candle lighting | Shabbos/Yom Tov summary | Opus | "Going into Shabbos" status check |
 
-Valid categories: Military, Diplomatic, Political, Breaking, Markets, Strategic
+Valid categories: Military, Diplomatic, Political, Breaking, Strategic
 
 ## Configuration
 

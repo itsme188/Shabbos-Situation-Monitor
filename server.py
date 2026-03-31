@@ -91,6 +91,7 @@ from config import (
     THINK_TANK_SUMMARIZE, THINK_TANK_SUMMARY_MAX_NEW,
     POLYMARKET_API_BASE, POLYMARKET_TIMEOUT, PREDICTION_MARKETS,
     AI_SUMMARY_MARKET_THRESHOLD, AI_SUMMARY_CANDLE_LIGHTING_PROMPT,
+    OIL_TICKER, OIL_FETCH_TIMEOUT,
     YOM_TOV_END,
 )
 
@@ -1573,6 +1574,65 @@ def _build_market_digest() -> str:
     return "\n".join(lines)
 
 
+# ============ OIL PRICE FETCHER (background significance signal) ============
+
+# Module-level state — ephemeral, not persisted to cache file
+_oil_context: Dict = {}
+
+
+def fetch_oil_price() -> None:
+    """Fetch WTI crude oil price via Yahoo Finance chart API.
+
+    Stores result in _oil_context for use by _build_oil_context().
+    On failure, _oil_context stays empty — the LLM just loses the signal.
+    """
+    global _oil_context
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{OIL_TICKER}?range=1d&interval=1d"
+    try:
+        resp = safe_request(url, timeout=OIL_FETCH_TIMEOUT)
+        if not resp:
+            return
+        data = resp.json()
+        result = data["chart"]["result"][0]
+        meta = result["meta"]
+        price = meta["regularMarketPrice"]
+        prev_close = meta["chartPreviousClose"]
+        change = price - prev_close
+        change_pct = (change / prev_close) * 100 if prev_close else 0
+        _oil_context = {
+            "price": price,
+            "previous_close": prev_close,
+            "change": change,
+            "change_pct": change_pct,
+            "fetched_at": datetime.now(ZoneInfo("America/New_York")),
+        }
+        logger.info(f"Oil price: ${price:.2f} ({'+' if change >= 0 else ''}{change:.2f}, {'+' if change_pct >= 0 else ''}{change_pct:.1f}%)")
+    except Exception as e:
+        logger.debug(f"Oil price fetch failed (non-critical): {e}")
+
+
+def _build_oil_context() -> str:
+    """Build oil price context section for AI significance weighting.
+
+    Returns a text block for the LLM digest, or empty string if no data.
+    The LLM is instructed to use this ONLY for calibrating event importance,
+    never to mention oil prices in its output.
+    """
+    if not _oil_context or "price" not in _oil_context:
+        return ""
+    price = _oil_context["price"]
+    change = _oil_context["change"]
+    change_pct = _oil_context["change_pct"]
+    sign = "+" if change >= 0 else ""
+    lines = [
+        "\n--- OIL MARKET CONTEXT (background signal only — DO NOT mention in output) ---",
+        f"WTI Crude: ${price:.2f} ({sign}{change:.2f}, {sign}{change_pct:.1f}%)",
+        "Use this ONLY to gauge event significance: large moves = markets reacting,",
+        "flat = priced in or noise. NEVER mention oil, prices, or financial data in your output.",
+    ]
+    return "\n".join(lines)
+
+
 # ============ THINK TANK FETCHER ============
 
 # Cache for AI-generated article summaries (keyed by article URL)
@@ -1802,15 +1862,13 @@ def fetch_think_tanks() -> None:
 # ============ AI SUMMARY FETCHER ============
 
 
-def _parse_ai_bullets(summary_text: str) -> tuple:
+def _parse_ai_bullets(summary_text: str) -> list:
     """Parse AI-generated summary text into structured bullet points.
 
     Returns:
-        (bullets, market_signal): bullets is a list of dicts, market_signal is
-        a string (or None) extracted from the [Market Signal] line.
+        List of bullet dicts with keys: text, timestamp_display, category.
     """
     bullets = []
-    market_signal = None
     time_pattern = re.compile(r'^\[([^\]]+)\]\s*(?:[A-Z][a-z]{2}\s+)?(\d{1,2}:\d{2}(?:\s*[AaPp][Mm])?)\s*[-\u2013\u2014]\s*(.+)$')
     gen_time = datetime.now(ZoneInfo("America/New_York")).strftime("%a %-I:%M %p")
 
@@ -1822,9 +1880,8 @@ def _parse_ai_bullets(summary_text: str) -> tuple:
         if not cleaned:
             continue
 
-        # Extract [Market Signal] line separately
+        # Skip any residual market signal lines (prompt no longer requests them)
         if cleaned.startswith("[Market Signal]"):
-            market_signal = cleaned.replace("[Market Signal]", "").strip().lstrip(":-–— ").strip()
             continue
 
         match = time_pattern.match(cleaned)
@@ -1860,7 +1917,7 @@ def _parse_ai_bullets(summary_text: str) -> tuple:
             return display_str  # Old 24hr format still sorts ok
 
     bullets.sort(key=lambda b: _sort_key_for_time(b.get("timestamp_display", "99:99")))
-    return bullets, market_signal
+    return bullets
 
 
 def _prune_old_summaries() -> None:
@@ -1968,6 +2025,9 @@ def _generate_morning_summary(api_key: str) -> None:
     full_digest = feed_digest
     if market_digest:
         full_digest += "\n" + market_digest
+    oil_digest = _build_oil_context()
+    if oil_digest:
+        full_digest += "\n" + oil_digest
 
     max_retries = 2
     for attempt in range(max_retries):
@@ -2045,6 +2105,11 @@ def _generate_regular_summary(api_key: str) -> None:
         cache["ai_summary"]["error"] = "No feed data available to summarize"
         return
 
+    full_digest = feed_digest
+    oil_digest = _build_oil_context()
+    if oil_digest:
+        full_digest += "\n" + oil_digest
+
     max_retries = 2
     for attempt in range(max_retries):
         try:
@@ -2055,12 +2120,12 @@ def _generate_regular_summary(api_key: str) -> None:
                 system=AI_SUMMARY_REGULAR_PROMPT,
                 messages=[{
                     "role": "user",
-                    "content": f"Here are the current feed items. Summarize the key developments:\n\n{feed_digest}",
+                    "content": f"Here are the current feed items. Summarize the key developments:\n\n{full_digest}",
                 }],
             )
 
             summary_text = message.content[0].text
-            bullets, market_signal = _parse_ai_bullets(summary_text)
+            bullets = _parse_ai_bullets(summary_text)
 
             gen_time = datetime.now()
             gen_et = datetime.now(ZoneInfo("America/New_York"))
@@ -2073,7 +2138,6 @@ def _generate_regular_summary(api_key: str) -> None:
                 "generated_at_display": gen_et.strftime("%a %-I:%M %p ET"),
                 "hour_label": f"{hour_start.strftime('%-I:%M')}-{hour_end.strftime('%-I:%M %p')} ET",
                 "bullets": bullets,
-                "market_signal": market_signal,
             }
 
             summaries = cache["ai_summary"].get("summaries", [])
@@ -2201,6 +2265,9 @@ def _generate_candle_lighting_summary(api_key: str) -> None:
     full_digest = feed_digest
     if market_digest:
         full_digest += "\n" + market_digest
+    oil_digest = _build_oil_context()
+    if oil_digest:
+        full_digest += "\n" + oil_digest
 
     max_retries = 2
     for attempt in range(max_retries):
@@ -2326,9 +2393,10 @@ def update_all_feeds() -> None:
         "toi": fetch_toi,
         "think_tanks": fetch_think_tanks,
         "prediction_markets": fetch_prediction_markets,
+        "oil_price": fetch_oil_price,
     }
 
-    with ThreadPoolExecutor(max_workers=6) as executor:
+    with ThreadPoolExecutor(max_workers=7) as executor:
         futures = {
             executor.submit(fn): name
             for name, fn in fetchers.items()
