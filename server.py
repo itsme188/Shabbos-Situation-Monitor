@@ -78,7 +78,7 @@ from config import (
     TWITTER_SYNDICATION_TIMEOUT, TWITTER_ACCOUNT_TIMEOUT, XCANCEL_USER_AGENT,
     BLUESKY_HANDLES, BLUESKY_API_BASE,
     TWSTALKER_BASE, TWSTALKER_TIMEOUT,
-    MAX_ITEMS_PER_FEED, REQUEST_TIMEOUT,
+    MAX_ITEMS_PER_FEED, NEWS_FEED_MAX_AGE_HOURS, REQUEST_TIMEOUT,
     LOCATION_LAT, LOCATION_LON, LOCATION_TZ,
     CANDLE_LIGHTING_OFFSET, HAVDALAH_OFFSET,
     CACHE_FILE, CACHE_MAX_AGE,
@@ -178,6 +178,7 @@ def save_cache_to_disk() -> None:
                     "feeds": serializable,
                     "backoff_state": backoff_state,
                 "ai_summary_enabled": ai_summary_enabled,
+                "article_summary_cache": dict(_article_summary_cache),
                 }, f)
             os.replace(tmp_path, CACHE_FILE)
         except Exception:
@@ -220,7 +221,20 @@ def load_cache_from_disk() -> bool:
                 if feed_name == "ai_summary":
                     cache[feed_name]["summaries"] = feed_data.get("summaries", [])
                     cache[feed_name]["morning_summary"] = feed_data.get("morning_summary")
+                # Restore article summary cache from think tank items
+                if feed_name == "think_tanks":
+                    for item in feed_data["items"]:
+                        url = item.get("link", "")
+                        summary = item.get("summary", "")
+                        if url and summary:
+                            _article_summary_cache[url] = summary
                 loaded_count += 1
+        # Restore article summary cache from top-level field (wider coverage)
+        persisted_summaries = data.get("article_summary_cache", {})
+        if persisted_summaries:
+            _article_summary_cache.update(persisted_summaries)
+        if _article_summary_cache:
+            logger.info(f"Restored {len(_article_summary_cache)} article summaries from disk cache")
         # Restore backoff state so crash-restarts don't re-hammer rate-limited services
         _restore_backoff_state(data)
         # Restore AI summary enabled state so crash-restarts don't lose the toggle
@@ -1205,6 +1219,8 @@ def fetch_reuters() -> None:
         return
 
     logger.info("Fetching Middle East news...")
+    now = datetime.now(ZoneInfo("UTC"))
+    max_age = timedelta(hours=NEWS_FEED_MAX_AGE_HOURS)
 
     # Try sources in order: primary Google News, then BBC fallback
     sources = [
@@ -1225,14 +1241,26 @@ def fetch_reuters() -> None:
             feed = feedparser.parse(response.content)
             if feed.entries:
                 items = []
-                for entry in feed.entries[:MAX_ITEMS_PER_FEED]:
+                for entry in feed.entries[:MAX_ITEMS_PER_FEED * 2]:  # Fetch extra to compensate for age filtering
+                    # Filter out stale entries
+                    published = entry.get("published", "")
+                    try:
+                        pub_dt = parsedate_to_datetime(published)
+                        if pub_dt.tzinfo is None:
+                            pub_dt = pub_dt.replace(tzinfo=ZoneInfo("UTC"))
+                        if (now - pub_dt) > max_age:
+                            continue
+                    except (ValueError, TypeError):
+                        pass  # Unparseable timestamps pass through
                     items.append({
                         "title": entry.get("title", ""),
                         "summary": clean_html(entry.get("summary", ""))[:250],
-                        "timestamp": entry.get("published", ""),
-                        "timestamp_display": format_timestamp(entry.get("published", "")),
+                        "timestamp": published,
+                        "timestamp_display": format_timestamp(published),
                         "link": entry.get("link", ""),
                     })
+                    if len(items) >= MAX_ITEMS_PER_FEED:
+                        break
 
                 error_msg = None if source_name == "Google News" else f"Primary source unavailable — showing {source_name}"
                 cache["reuters"] = {
@@ -1594,6 +1622,10 @@ def _summarize_article(title: str, text: str, api_key: str) -> str:
         text = message.content[0].text.strip()
         # Strip markdown headers the model sometimes adds
         text = re.sub(r'^#+\s*summary\s*\n*', '', text, flags=re.IGNORECASE).strip()
+        # Reject responses where the LLM says it can't access the content
+        if any(phrase in text.lower() for phrase in ["don't have access", "cannot access", "i'm unable", "i cannot"]):
+            logger.debug(f"LLM returned refusal for '{title[:50]}', discarding")
+            return ""
         return text
     except Exception as e:
         logger.warning(f"Article summarization failed for '{title[:50]}': {e}")
