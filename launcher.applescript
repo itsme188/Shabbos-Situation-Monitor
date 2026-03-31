@@ -14,7 +14,7 @@ if not serverRunning then
 	-- Start the server in Terminal
 	tell application "Terminal"
 		activate
-		do script "cd '/Users/Yitzi/Desktop/shabbos situation monitor' && ./start.sh"
+		do script "cd '/Users/Yitzi/code/shabbos-situation-monitor' && ./start.sh"
 	end tell
 
 	-- Poll /health until the server is ready (up to maxWait seconds)
