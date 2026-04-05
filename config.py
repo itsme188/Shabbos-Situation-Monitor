@@ -101,6 +101,7 @@ CACHE_MAX_AGE = 7200  # seconds (2 hours) - ignore cache files older than this
 # Display settings
 MAX_ITEMS_PER_FEED = 15
 NEWS_FEED_MAX_AGE_HOURS = 36  # Skip news items older than this (Middle East, etc.)
+OSINT_MAX_AGE_HOURS = 48      # Skip OSINT posts older than this (prevents ancient posts when sources fail)
 
 # Request settings
 REQUEST_TIMEOUT = 15  # seconds - general

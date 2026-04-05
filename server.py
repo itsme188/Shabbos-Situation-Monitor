@@ -16,7 +16,7 @@ import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from logging.handlers import RotatingFileHandler
 from typing import Dict, List, Optional
 from email.utils import parsedate_to_datetime
@@ -78,7 +78,7 @@ from config import (
     TWITTER_SYNDICATION_TIMEOUT, TWITTER_ACCOUNT_TIMEOUT, XCANCEL_USER_AGENT,
     BLUESKY_HANDLES, BLUESKY_API_BASE,
     TWSTALKER_BASE, TWSTALKER_TIMEOUT,
-    MAX_ITEMS_PER_FEED, NEWS_FEED_MAX_AGE_HOURS, REQUEST_TIMEOUT,
+    MAX_ITEMS_PER_FEED, NEWS_FEED_MAX_AGE_HOURS, OSINT_MAX_AGE_HOURS, REQUEST_TIMEOUT,
     LOCATION_LAT, LOCATION_LON, LOCATION_TZ,
     CANDLE_LIGHTING_OFFSET, HAVDALAH_OFFSET,
     CACHE_FILE, CACHE_MAX_AGE,
@@ -117,6 +117,17 @@ if not HAS_ANTHROPIC:
 
 # Flask app
 app = Flask(__name__)
+
+
+@app.template_filter('friendly_date')
+def friendly_date_filter(date_str):
+    """Convert '2026-04-04' to 'Friday, April 4' for day separators."""
+    try:
+        d = date.fromisoformat(date_str)
+        return d.strftime('%A, %B %-d')
+    except (ValueError, TypeError):
+        return date_str
+
 
 # Global cache for all feeds
 cache: Dict = {
@@ -489,6 +500,23 @@ def get_yom_tov_info() -> Dict:
             window_start = None
             window_candles = 0
 
+    # Merge adjacent windows where gap < 36 hours
+    # Handles Yom Tov → Shabbat, Shabbat → Yom Tov, multi-part holidays
+    MAX_MERGE_GAP_HOURS = 36
+    merged = []
+    for w in windows:
+        if merged and (w["candle_lighting"] - merged[-1]["havdalah"]).total_seconds() < MAX_MERGE_GAP_HOURS * 3600:
+            # Merge: extend the previous window to cover this one
+            prev = merged[-1]
+            prev["havdalah"] = w["havdalah"]
+            prev["days"] = (w["havdalah"].date() - prev["candle_lighting"].date()).days + 1
+            # Keep the Yom Tov name (prefer named holiday over "Shabbos")
+            if w["name"] and w["name"] != "Shabbos":
+                prev["name"] = w["name"]
+        else:
+            merged.append(w)
+    windows = merged
+
     # Find the most relevant window: currently active or upcoming within 7 days
     for w in windows:
         if w["candle_lighting"] <= now <= w["havdalah"]:
@@ -699,6 +727,24 @@ def fetch_twitter_accounts() -> None:
                 account_status[username] = False
 
     if all_items:
+        # Filter out stale items (prevents ancient posts from filling cache when sources fail)
+        now_utc = datetime.now(ZoneInfo("UTC"))
+        max_age = timedelta(hours=OSINT_MAX_AGE_HOURS)
+        fresh_items = []
+        for item in all_items:
+            ts = item.get("timestamp", "")
+            if ts:
+                try:
+                    item_dt = datetime.fromisoformat(ts)
+                    if item_dt.tzinfo is None:
+                        item_dt = item_dt.replace(tzinfo=ZoneInfo("UTC"))
+                    if (now_utc - item_dt) > max_age:
+                        continue
+                except (ValueError, TypeError):
+                    pass  # Keep items with unparseable timestamps
+            fresh_items.append(item)
+        all_items = fresh_items
+
         all_items.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
         cache["twitter_list"] = {
             "items": all_items[:MAX_ITEMS_PER_FEED],
@@ -1751,12 +1797,14 @@ def fetch_think_tanks() -> None:
             if not scraped:
                 errors.append(f"{feed_def['name']}: no articles found")
             for item in scraped:
+                # Use fetch time as fallback timestamp so age filtering works
+                ts = item.get("timestamp", "") or now.isoformat()
                 all_items.append({
                     "title": item["title"],
                     "summary": "",
                     "raw_content": "",
-                    "timestamp": "",  # Scraped pages don't have timestamps
-                    "timestamp_display": "",
+                    "timestamp": ts,
+                    "timestamp_display": format_timestamp(ts),
                     "link": item["link"],
                     "source": item["source"],
                     "author": "",
@@ -2062,7 +2110,7 @@ def _generate_morning_summary(api_key: str) -> None:
             # Also prepend to summaries list for history
             summaries = cache["ai_summary"].get("summaries", [])
             summaries.insert(0, morning_entry)
-            cache["ai_summary"]["summaries"] = summaries[:AI_SUMMARY_MAX_ENTRIES]
+            cache["ai_summary"]["summaries"] = summaries[:_effective_max_entries()]
 
             cache["ai_summary"]["items"] = []
             cache["ai_summary"]["last_updated"] = gen_time
@@ -2142,7 +2190,7 @@ def _generate_regular_summary(api_key: str) -> None:
 
             summaries = cache["ai_summary"].get("summaries", [])
             summaries.insert(0, summary_entry)
-            cache["ai_summary"]["summaries"] = summaries[:AI_SUMMARY_MAX_ENTRIES]
+            cache["ai_summary"]["summaries"] = summaries[:_effective_max_entries()]
 
             cache["ai_summary"]["items"] = bullets
             cache["ai_summary"]["last_updated"] = gen_time
@@ -2175,18 +2223,38 @@ def _generate_regular_summary(api_key: str) -> None:
 def _effective_retention_days() -> int:
     """Return the effective AI summary retention days.
 
-    Uses config value, but also checks Hebcal for active Yom Tov —
-    if we're in a multi-day holiday, automatically extends retention.
+    Uses config value, but also checks Hebcal for active or upcoming Yom Tov —
+    if we're in a multi-day holiday (or one starts within 24h), automatically
+    extends retention to prevent premature pruning on erev Yom Tov.
     """
     if AI_SUMMARY_RETENTION_DAYS > 1:
         return AI_SUMMARY_RETENTION_DAYS  # Manual override takes precedence
     try:
         yt = get_yom_tov_info()
-        if yt and yt.get("active") and yt.get("days", 1) > 1:
-            return yt["days"]
+        if yt and yt.get("days", 1) > 1:
+            if yt.get("active"):
+                return yt["days"]
+            # Upcoming within 24h — start extending retention early
+            candle = yt.get("candle_lighting")
+            if candle:
+                hours_until = (candle - datetime.now(candle.tzinfo)).total_seconds() / 3600
+                if 0 < hours_until <= 24:
+                    return yt["days"]
     except Exception:
         pass
     return AI_SUMMARY_RETENTION_DAYS
+
+
+def _effective_max_entries() -> int:
+    """Dynamic cap for AI summary entries based on retention window.
+
+    Normal Shabbos: 30 entries (config default).
+    Multi-day Yom Tov: ~15 entries/day (morning + 12 regular + candle lighting + buffer).
+    """
+    retention = _effective_retention_days()
+    if retention <= 1:
+        return AI_SUMMARY_MAX_ENTRIES
+    return retention * 15
 
 
 def fetch_ai_summary(force: bool = False) -> None:
@@ -2204,9 +2272,21 @@ def fetch_ai_summary(force: bool = False) -> None:
         return
 
     # Auto-pause if nobody has viewed the dashboard recently
-    # Skip during multi-day Yom Tov mode — nobody views dashboard but summaries must keep generating
+    # Skip during multi-day Yom Tov mode or on erev Yom Tov —
+    # nobody views dashboard but summaries must keep generating
     retention = _effective_retention_days()
-    if retention <= 1 and _last_dashboard_view is not None:
+    skip_auto_pause = retention > 1
+    if not skip_auto_pause:
+        try:
+            yt = get_yom_tov_info()
+            if yt and not yt.get("active"):
+                candle = yt.get("candle_lighting")
+                if candle and candle.date() == datetime.now(ZoneInfo("America/New_York")).date():
+                    skip_auto_pause = True  # Erev Yom Tov — don't auto-pause
+        except Exception:
+            pass
+
+    if not skip_auto_pause and _last_dashboard_view is not None:
         idle_seconds = (datetime.now() - _last_dashboard_view).total_seconds()
         if idle_seconds > AI_INACTIVITY_TIMEOUT:
             ai_summary_enabled = False
@@ -2298,7 +2378,7 @@ def _generate_candle_lighting_summary(api_key: str) -> None:
 
             summaries = cache["ai_summary"].get("summaries", [])
             summaries.insert(0, candle_entry)
-            cache["ai_summary"]["summaries"] = summaries[:AI_SUMMARY_MAX_ENTRIES]
+            cache["ai_summary"]["summaries"] = summaries[:_effective_max_entries()]
 
             cache["ai_summary"]["items"] = []
             cache["ai_summary"]["last_updated"] = gen_time

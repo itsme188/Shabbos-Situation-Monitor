@@ -741,7 +741,7 @@
                         {% set entry_date = entry.generated_at[:10] %}
                         {% if entry_date != prev_date.val %}
                             {% if prev_date.val != '' %}
-                            <div class="day-separator">{{ entry_date }}</div>
+                            <div class="day-separator">{{ entry_date|friendly_date }}</div>
                             {% endif %}
                             {% set prev_date.val = entry_date %}
                         {% endif %}
