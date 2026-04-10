@@ -176,6 +176,19 @@
             letter-spacing: 0.08em;
             border-bottom: 2px solid var(--border);
             background: var(--bg-header);
+            cursor: pointer;
+            user-select: none;
+        }
+        .day-separator::before {
+            content: '\25BC ';  /* ▼ */
+            font-size: 0.5rem;
+            vertical-align: middle;
+        }
+        .day-separator.collapsed::before {
+            content: '\25B6 ';  /* ▶ */
+        }
+        .day-group.collapsed {
+            display: none;
         }
 
         .feed-count {
@@ -733,17 +746,28 @@
                     </div>
                     {% endif %}
 
-                    {# === Summary blocks (newest first) with day separators === #}
+                    {# === Summary blocks (newest first) with collapsible day groups === #}
                     {% if cache['ai_summary'].get('summaries') %}
                         {% set prev_date = namespace(val='') %}
+                        {% set group_open = namespace(val=false) %}
                         {% for entry in cache['ai_summary']['summaries'] %}
-                        {# Day separator when date changes (for multi-day Yom Tov) #}
+                        {# Day group boundary — close previous group, show separator, open new group #}
                         {% set entry_date = entry.generated_at[:10] %}
                         {% if entry_date != prev_date.val %}
+                            {% if group_open.val %}
+                            </div>{# close previous day-group #}
+                            {% endif %}
                             {% if prev_date.val != '' %}
-                            <div class="day-separator">{{ entry_date|friendly_date }}</div>
+                            {# Older day: separator + collapsed group #}
+                            {% set is_old_day = entry_date != today_et %}
+                            <div class="day-separator{{ ' collapsed' if is_old_day else '' }}">{{ entry_date|friendly_date }}</div>
+                            <div class="day-group{{ ' collapsed' if is_old_day else '' }}">
+                            {% else %}
+                            {# First group (today): no separator, expanded #}
+                            <div class="day-group">
                             {% endif %}
                             {% set prev_date.val = entry_date %}
+                            {% set group_open.val = true %}
                         {% endif %}
 
                         {% if entry.get('type') == 'morning' and entry == cache['ai_summary'].get('morning_summary') %}
@@ -774,6 +798,9 @@
                             </div>
                         {% endif %}
                         {% endfor %}
+                        {% if group_open.val %}
+                        </div>{# close last day-group #}
+                        {% endif %}
                     {% elif cache['ai_summary']['items'] %}
                         {# Backward compat: old format without summary blocks #}
                         {% for item in cache['ai_summary']['items'] %}
@@ -880,6 +907,17 @@
                     }
                 });
         }
+
+        // ===== Collapsible day groups in AI summary =====
+        document.addEventListener('click', function(e) {
+            if (e.target.classList.contains('day-separator')) {
+                e.target.classList.toggle('collapsed');
+                var group = e.target.nextElementSibling;
+                if (group && group.classList.contains('day-group')) {
+                    group.classList.toggle('collapsed');
+                }
+            }
+        });
 
         // ===== Auto-scroll for feed columns =====
         function setupAutoScroll(elementId) {

@@ -208,8 +208,14 @@ def save_cache_to_disk() -> None:
 def load_cache_from_disk() -> bool:
     """Load cached feed data from disk on startup.
 
-    Returns True if cache was loaded, False otherwise.
-    Only loads if the cache file is less than CACHE_MAX_AGE seconds old.
+    Returns True if any data was loaded, False otherwise.
+
+    Two-phase loading:
+      1. Always restore (any cache age): AI summaries (have their own retention
+         logic via _prune_old_summaries), article summary cache, backoff state,
+         AI toggle. These are expensive to regenerate and have independent expiry.
+      2. Freshness-gated (<=CACHE_MAX_AGE): Feed items (OSINT, Trump, Reuters,
+         etc.) — stale feed data is misleading, so only load if recent.
     """
     try:
         if not os.path.exists(CACHE_FILE):
@@ -218,43 +224,58 @@ def load_cache_from_disk() -> bool:
             data = json.load(f)
         saved_at = datetime.fromisoformat(data["saved_at"])
         age = (datetime.now() - saved_at).total_seconds()
-        if age > CACHE_MAX_AGE:
-            logger.info(f"Cache file is {age/60:.0f}m old (>{CACHE_MAX_AGE/60:.0f}m limit), ignoring")
-            return False
+        feeds_fresh = age <= CACHE_MAX_AGE
+        if not feeds_fresh:
+            logger.info(f"Cache file is {age/60:.0f}m old (>{CACHE_MAX_AGE/60:.0f}m limit), "
+                        f"skipping stale feeds but restoring AI summaries/state")
+
         feeds = data.get("feeds", {})
         loaded_count = 0
-        for feed_name, feed_data in feeds.items():
-            if feed_name in cache and feed_data.get("items"):
-                cache[feed_name]["items"] = feed_data["items"]
-                cache[feed_name]["error"] = feed_data.get("error")
-                if feed_data.get("last_updated"):
-                    cache[feed_name]["last_updated"] = datetime.fromisoformat(feed_data["last_updated"])
-                # Restore AI summary history
-                if feed_name == "ai_summary":
-                    cache[feed_name]["summaries"] = feed_data.get("summaries", [])
-                    cache[feed_name]["morning_summary"] = feed_data.get("morning_summary")
-                # Restore article summary cache from think tank items
-                if feed_name == "think_tanks":
-                    for item in feed_data["items"]:
-                        url = item.get("link", "")
-                        summary = item.get("summary", "")
-                        if url and summary:
-                            _article_summary_cache[url] = summary
-                loaded_count += 1
-        # Restore article summary cache from top-level field (wider coverage)
+
+        # --- Phase 1: Always restore AI summaries (independent retention) ---
+        ai_data = feeds.get("ai_summary", {})
+        if "ai_summary" in cache and (ai_data.get("items") or ai_data.get("summaries")):
+            cache["ai_summary"]["items"] = ai_data.get("items", [])
+            cache["ai_summary"]["error"] = ai_data.get("error")
+            if ai_data.get("last_updated"):
+                cache["ai_summary"]["last_updated"] = datetime.fromisoformat(ai_data["last_updated"])
+            cache["ai_summary"]["summaries"] = ai_data.get("summaries", [])
+            cache["ai_summary"]["morning_summary"] = ai_data.get("morning_summary")
+            loaded_count += 1
+
+        # --- Phase 1: Always restore article summary cache (expensive API calls) ---
         persisted_summaries = data.get("article_summary_cache", {})
         if persisted_summaries:
             _article_summary_cache.update(persisted_summaries)
+        # Also restore from think tank items if present
+        for item in feeds.get("think_tanks", {}).get("items", []):
+            url = item.get("link", "")
+            summary = item.get("summary", "")
+            if url and summary:
+                _article_summary_cache[url] = summary
         if _article_summary_cache:
             logger.info(f"Restored {len(_article_summary_cache)} article summaries from disk cache")
-        # Restore backoff state so crash-restarts don't re-hammer rate-limited services
+
+        # --- Phase 1: Always restore backoff state and AI toggle ---
         _restore_backoff_state(data)
-        # Restore AI summary enabled state so crash-restarts don't lose the toggle
         global ai_summary_enabled
         if data.get("ai_summary_enabled") is not None:
             ai_summary_enabled = data["ai_summary_enabled"]
             logger.info(f"Restored AI summary enabled state: {ai_summary_enabled}")
-        # Prune AI summaries from previous days
+
+        # --- Phase 2: Only load feed items if cache is fresh ---
+        if feeds_fresh:
+            for feed_name, feed_data in feeds.items():
+                if feed_name == "ai_summary":
+                    continue  # Already handled in Phase 1
+                if feed_name in cache and feed_data.get("items"):
+                    cache[feed_name]["items"] = feed_data["items"]
+                    cache[feed_name]["error"] = feed_data.get("error")
+                    if feed_data.get("last_updated"):
+                        cache[feed_name]["last_updated"] = datetime.fromisoformat(feed_data["last_updated"])
+                    loaded_count += 1
+
+        # Prune AI summaries outside the retention window
         _prune_old_summaries()
         logger.info(f"Loaded {loaded_count} feeds from disk cache ({age/60:.1f}m old)")
         return loaded_count > 0
@@ -632,6 +653,39 @@ def format_timestamp(timestamp_str: str, source_tz: str = None) -> str:
         dt = dt.astimezone(ZoneInfo("America/New_York"))
 
     return dt.strftime('%a %-I:%M %p')
+
+
+def _parse_timestamp_to_epoch(timestamp_str: str) -> float:
+    """Parse various timestamp formats to Unix epoch for reliable sorting.
+
+    Handles: ISO 8601, RFC 2822, Nitter/BlueSky display format.
+    Returns 0.0 for empty/unparseable strings (sorts to bottom in reverse).
+    """
+    if not timestamp_str:
+        return 0.0
+    # Try ISO 8601 first (BlueSky API, TwStalker _relative_to_iso)
+    try:
+        dt = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+        return dt.timestamp()
+    except (ValueError, TypeError):
+        pass
+    # Try RFC 2822 (Trump RSS, Reuters RSS, TOI RSS)
+    try:
+        dt = parsedate_to_datetime(timestamp_str)
+        return dt.timestamp()
+    except (ValueError, TypeError):
+        pass
+    # Try Nitter HTML / BlueSky display format: "Apr 9, 2026 · 11:56 PM UTC"
+    try:
+        is_utc = 'UTC' in timestamp_str or timestamp_str.endswith(' UT')
+        cleaned = timestamp_str.replace(' · ', ' ').replace(' UTC', '').replace(' UT', '')
+        dt = datetime.strptime(cleaned, '%b %d, %Y %I:%M %p')
+        if is_utc:
+            dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+        return dt.timestamp()
+    except (ValueError, TypeError):
+        pass
+    return 0.0
 
 
 def clean_html(html_text: str) -> str:
@@ -2559,8 +2613,11 @@ def dashboard():
         raw_items.append({**item, "feed_source": "osint"})
     for item in cache["trump"]["items"][:8]:
         raw_items.append({**item, "feed_source": "trump"})
-    # Sort by timestamp descending (newest first) — ISO strings sort lexicographically
-    raw_items.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+    # Sort by parsed epoch (handles mixed formats: ISO, RFC 2822, BlueSky display)
+    raw_items.sort(key=lambda x: _parse_timestamp_to_epoch(x.get("timestamp", "")), reverse=True)
+
+    # Today's date in ET for collapsing older AI summary day groups
+    today_et = datetime.now(ZoneInfo("America/New_York")).strftime('%Y-%m-%d')
 
     return render_template(
         "index.html",
@@ -2575,6 +2632,7 @@ def dashboard():
         yom_tov_end=YOM_TOV_END or (yom_tov_info is not None),
         yom_tov_info=yom_tov_info,
         yom_tov_end_display=yom_tov_end_display,
+        today_et=today_et,
     )
 
 
