@@ -522,11 +522,21 @@ def get_yom_tov_info() -> Dict:
             window_candles = 0
 
     # Merge adjacent windows where gap < 36 hours
-    # Handles Yom Tov → Shabbat, Shabbat → Yom Tov, multi-part holidays
+    # Only merge a trailing Shabbos if it's sandwiched (followed by another Yom Tov)
     MAX_MERGE_GAP_HOURS = 36
     merged = []
-    for w in windows:
+    for i, w in enumerate(windows):
         if merged and (w["candle_lighting"] - merged[-1]["havdalah"]).total_seconds() < MAX_MERGE_GAP_HOURS * 3600:
+            # If this is a plain Shabbos, only merge if sandwiched between Yom Tov windows
+            if w["name"] == "Shabbos":
+                is_sandwiched = False
+                if i + 1 < len(windows):
+                    next_w = windows[i + 1]
+                    if (next_w["candle_lighting"] - w["havdalah"]).total_seconds() < MAX_MERGE_GAP_HOURS * 3600:
+                        is_sandwiched = True
+                if not is_sandwiched:
+                    merged.append(w)
+                    continue
             # Merge: extend the previous window to cover this one
             prev = merged[-1]
             prev["havdalah"] = w["havdalah"]
@@ -539,7 +549,10 @@ def get_yom_tov_info() -> Dict:
     windows = merged
 
     # Find the most relevant window: currently active or upcoming within 7 days
+    # Skip plain Shabbos windows — those are handled by get_shabbos_times()
     for w in windows:
+        if w["name"] == "Shabbos":
+            continue
         if w["candle_lighting"] <= now <= w["havdalah"]:
             # Currently in this Yom Tov
             return {
@@ -1591,19 +1604,22 @@ def fetch_prediction_markets() -> None:
                 errors.append(f"{market_def['name']}: no markets in event")
                 continue
 
-            # Find the right sub-market
+            # Find the right sub-market. Resolved markets freeze at 0/100 —
+            # never use them, and never substitute a differently-dated
+            # sub-market for a named one (the label would be wrong).
             target_slug = market_def.get("market_slug")
+            open_markets = [m for m in markets if not m.get("closed")]
             market = None
             if target_slug:
-                for m in markets:
+                for m in open_markets:
                     if m.get("slug") == target_slug:
                         market = m
                         break
-                if not market:
-                    open_markets = [m for m in markets if not m.get("closed")]
-                    market = open_markets[-1] if open_markets else markets[-1]
             else:
-                market = markets[0]
+                market = open_markets[0] if open_markets else None
+            if market is None:
+                errors.append(f"{market_def['name']}: market resolved/closed")
+                continue
 
             # Extract "Yes" probability from outcomePrices
             outcome_prices = market.get("outcomePrices", "[]")
