@@ -140,19 +140,9 @@ THINK_TANK_SUMMARY_MAX_NEW = 5  # Max new articles to summarize per cycle (rate 
 # Used for AI summary context only (no UI display). Fetched every cycle.
 POLYMARKET_API_BASE = "https://gamma-api.polymarket.com"
 POLYMARKET_TIMEOUT = 10  # seconds per request
+# Date-scoped markets expire — the fetcher skips closed markets, but refresh
+# this list periodically (slugs verified live 2026-07-17).
 PREDICTION_MARKETS = [
-    {
-        "name": "Nuclear Deal",
-        "event_slug": "us-iran-nuclear-deal-before-2027",
-        "market_slug": None,  # single-market event
-        "type": "deescalation",
-    },
-    {
-        "name": "US Forces in Iran",
-        "event_slug": "us-forces-enter-iran-by",
-        "market_slug": "us-forces-enter-iran-by-december-31-573-642-385-371-179",
-        "type": "escalation",
-    },
     {
         "name": "Ground Invasion",
         "event_slug": "will-the-us-invade-iran-before-2027",
@@ -160,10 +150,29 @@ PREDICTION_MARKETS = [
         "type": "escalation",
     },
     {
-        "name": "Ceasefire by June 30",
-        "event_slug": "iran-x-israelus-conflict-ends-by",
-        "market_slug": "iran-x-israelus-conflict-ends-by-june-30-813-454",
+        # Polymarket's own slug misspells "ceasefire" — copy exactly
+        "name": "Ceasefire by July 31",
+        "event_slug": "us-x-iran-effective-ceasfire-byptptpt-2-week-pause-20260715194822042",
+        "market_slug": "us-x-iran-effective-ceasfire-by-july-31-20260715194822045",
         "type": "deescalation",
+    },
+    {
+        "name": "Hormuz Normal by Dec 31",
+        "event_slug": "strait-of-hormuz-traffic-returns-to-normal-by-december-31",
+        "market_slug": None,
+        "type": "deescalation",
+    },
+    {
+        "name": "Regime Fall by 2027",
+        "event_slug": "will-the-iranian-regime-fall-by-the-end-of-2026",
+        "market_slug": None,
+        "type": "escalation",
+    },
+    {
+        "name": "Airspace Closure by July 31",
+        "event_slug": "iran-full-airspace-closure-byptptpt-20260625195253028",
+        "market_slug": "iran-full-airspace-closure-by-july-31-20260625195254150",
+        "type": "escalation",
     },
 ]
 AI_SUMMARY_MARKET_THRESHOLD = 5  # min percentage-point change to mention in summary
@@ -191,7 +200,7 @@ AI_SUMMARY_REGULAR_HOURS = [10, 12, 14, 16, 18, 20, 22, 0]  # 2-hour summaries
 AI_SUMMARY_QUIET_HOURS = range(1, 8)                     # 1 AM - 7 AM: no summaries
 
 # Models
-AI_SUMMARY_MORNING_MODEL = "claude-opus-4-6"             # Best quality for morning summary
+AI_SUMMARY_MORNING_MODEL = "claude-opus-4-8"             # Best quality for morning summary
 AI_SUMMARY_REGULAR_MODEL = "claude-haiku-4-5-20251001"   # Fast/cheap for 2-hour summaries
 
 AI_SUMMARY_MORNING_PROMPT = """You are a concise news analyst monitoring the Middle East situation.

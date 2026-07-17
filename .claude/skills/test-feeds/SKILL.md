@@ -42,13 +42,20 @@ if items:
 |------|----------|-----------|----------------|
 | Reuters/Middle East | `fetch_reuters` | `reuters` | 5-15 |
 | Trump Truth Social | `fetch_trump` | `trump` | 3-10 |
-| Times of Israel | `fetch_toi` | `toi` | 5-15 |
-| Polymarket | `fetch_polymarket` | `polymarket` | 1-5 |
-| OSINT/Twitter | `fetch_twitter_accounts` | `twitter_list` | 10-50 (13 accounts) |
+| Times of Israel | `fetch_toi` | `toi_liveblog` | 5-15 |
+| Think Tanks | `fetch_think_tanks` | `think_tanks` | 5-15 |
+| Prediction Markets | `fetch_prediction_markets` | `prediction_markets` | 1-5 (AI context only, no UI) |
+| Oil Price | `fetch_oil_price` | — (module global `server._oil_context`) | price + change_pct populated |
+| OSINT/Twitter | `fetch_twitter_accounts` | `twitter_list` | 15 (capped at MAX_ITEMS_PER_FEED) |
 
 **Test OSINT last** — it's the slowest (60s timeout, semaphore-limited TwStalker requests).
 
-Skip `fetch_ai_summary` — it requires the Anthropic API key and costs money.
+Notes:
+- **OSINT item count is capped at 15** (`MAX_ITEMS_PER_FEED`): ~13 accounts × 5 tweets are merged, sorted by recency, and truncated. Seeing only 4-6 accounts represented is normal during high-volume periods — the freshest posts crowd out quieter accounts. Check `cache["twitter_list"]["account_status"]` to distinguish "crowded out" from "failed to fetch".
+- **Prediction market items with probability 0 or 100 are suspect** — likely a resolved market that slipped through the `closed` filter. Flag it.
+- `fetch_think_tanks` calls Haiku to summarize new articles (cached by URL, max 5/cycle) — costs a few cents, that's expected.
+- Skip `fetch_ai_summary` — it's schedule-gated and costs more; test it via the running server's `/api/refresh-ai` endpoint instead when doing end-to-end validation.
+- **NEVER call `update_all_feeds()` from a direct-import test**: it ends with `save_cache_to_disk()`, which persists the process's in-memory defaults for state it never loaded — notably resetting `ai_summary_enabled` to False on disk (`load_cache_from_disk()` only runs in `__main__`). If you must run it, call `server.load_cache_from_disk()` first and re-check the toggle in `feed_cache.json` afterward.
 
 ## Report Format
 
@@ -59,8 +66,10 @@ After testing all feeds, summarize in a table:
 | Reuters | 12 | 15 min ago | none | OK |
 | Trump | 5 | 2 hours ago | none | OK |
 | TOI | 8 | 30 min ago | none | OK |
-| Polymarket | 3 | live | none | OK |
-| OSINT | 35 | 5 min ago | 2/13 failed | DEGRADED |
+| Think Tanks | 12 | 1 hour ago | none | OK |
+| Prediction Markets | 5 | live | none | OK |
+| Oil | — | live ($81.77 +4.5%) | none | OK |
+| OSINT | 15 | 5 min ago | 2/13 accounts failed | OK (cap reached) |
 
 Flag anything concerning:
 - 0 items = FAILED
