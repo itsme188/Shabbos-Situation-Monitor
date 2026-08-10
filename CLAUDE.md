@@ -19,30 +19,10 @@
 - `launcher.applescript` — macOS one-click startup (health-polls, reuses Safari tabs, error dialog)
 - `templates/index.html` — dashboard template
 
-## Known Issues (from first Shabbos run, Feb 27 2026 — grade: B-)
-- ~~**Polymarket:** resolved markets vanish from feed with no fallback~~ — REMOVED: Polymarket fully removed in PR #7.
-- ~~**Twitter:** hours-long gaps with no updates~~ — FIXED: 4-tier fallback (syndication → BlueSky → Nitter RSS → Nitter HTML), xcancel.com with "mistique" UA, Google News as last resort with source attribution
-- ~~**Times of Israel liveblog:** went silent for hours~~ — FIXED: Israel timezone for date URLs, zero-padded format variant, structural CSS fallback, stale cache clearing
-- ~~**Trump Truth Social:** posts containing links show opaque URLs instead of readable content~~ — FIXED: `extract_text_with_links()` now shows destination URLs inline. Empty media-only/retruth posts are filtered out.
-- Core value delivered: all key breaking news was surfaced
+## Current Known Issues
 
-## Known Issues (from second Shabbos run, Mar 7 2026 — grade: F)
-- ~~**CRITICAL: Zombie start.sh processes**~~ — FIXED: `start.sh` now checks if port 8080 is in use before starting (refuses with PID + kill command). Crash-loop also re-checks port before each restart.
-- ~~**server.py does expensive work before port binding**~~ — FIXED: Socket bind test in `__main__` runs before scheduler/watchdog/update_all_feeds(). Doomed instances exit immediately via `sys.exit(1)`.
-- ~~**Cache race condition**~~ — RESOLVED by zombie fix: only one process can run, so no concurrent writers.
-- ~~**TOI permanent 429**~~ — FIXED: Exponential backoff (5→10→20→30min cap) on 429 responses. `RateLimitError` in `safe_request(raise_on_429=True)` lets TOI fetcher skip cycles when rate-limited. Backoff resets on successful fetch.
-- ~~**OSINT degraded to 3/13 accounts**~~ — RESOLVED by zombie fix: single instance stays within TwStalker's Semaphore(2) rate limit.
-- ~~**Trump raw URLs**: Some Truth Social posts still show opaque `truthsocial.com/...` URLs instead of text content.~~ — FIXED: `extract_text_with_links()` strips bare truthsocial.com URLs via regex. Empty posts filtered by existing guard.
-- ~~**TOI liveblog showing 2020 content**~~ — FIXED: Base `/liveblog/` URL is a frozen 2020 COVID archive. Date-specific URLs now tried first, base URL is last resort.
-- ~~**AI summary paused/confused**~~ — RESOLVED by zombie fix: only one scheduler instance runs.
-- ~~**Logs lost**~~ — RESOLVED by zombie fix: no more crash-loop flood generating 35K lines in 10min.
-- ~~**TOI clears cache on failure**~~ — FIXED: `fetch_toi()` now preserves last-good items with "Showing cached content (fetch failed)" error instead of clearing to empty.
-
-## Known Issues (from third Shabbos run, Mar 14 2026 — grade: B-)
-- ~~**Feed timestamps in UTC, not ET**: TOI RSS, Trump, Reuters, BlueSky all displayed UTC times (4+ hours ahead of ET). User sees "Sat 11:08 PM" when it's 7:08 PM ET.~~ — FIXED: `format_timestamp()` now converts all timezone-aware datetimes to ET via `.astimezone()`. Optional `source_tz` param for naive datetimes (TOI liveblog → "Asia/Jerusalem").
-- ~~**AI summaries showed stale content from previous days**: 21 entries spanning 6 days (Sun–Sat) accumulated in cache. Monday's 8:05 AM morning summary visible on Saturday. No date filtering existed.~~ — FIXED: `_prune_old_summaries()` removes entries not from today (ET). Called at cache load, before generation, and on dashboard render. Summary cap reduced 24→14.
-- AI summaries may still reference old events when today's news articles discuss earlier events — LLM summarizes those references. Mitigated by feed digest timestamps now being in ET (consistent with "Current time" header sent to LLM).
-- Core value delivered: morning summary was good, big stories communicated
+- AI summaries may reference old events when today's news articles discuss earlier events — the LLM summarizes those references. Mitigated by feed digest timestamps being in ET (consistent with the "Current time" header sent to the LLM).
+- Run-by-run Shabbos history (three graded runs, all fixed issues) archived in `docs/reference/run-history.md`.
 
 ## Feed Architecture
 - Each feed has: fetcher function, cache entry, error state, last_updated timestamp
@@ -99,9 +79,6 @@
 - **TLS fingerprinting**: Some sites (twstalker.com) block Python `requests` via JA3 TLS fingerprint but allow `curl`. Use `subprocess.run(["curl", ...])` as workaround. macOS curl uses BoringSSL which passes
 - **Deploying worktree changes**: After merging PRs on GitHub, must `git pull origin main` in the main repo AND kill ALL server processes (see below) — start.sh auto-restarts with new code
 - **Kill ALL processes, not just port 8080**: `kill $(lsof -i :8080 -t)` only kills the one server holding the port. Zombie `start.sh` processes survive and keep crash-looping. Use: `pkill -f 'start.sh' ; pkill -f 'server.py'` then start fresh with ONE `./start.sh`
-- ~~**start.sh needs a PID/lock guard**~~ — DONE: Port check at startup + inside crash-loop
-- ~~**server.py must check port BEFORE doing work**~~ — DONE: Socket bind test in `__main__` before any fetching
-- ~~**Failed fetches should preserve last-good cache**~~ — DONE for TOI: preserves old items on failure
 - **Rate-limit backoff pattern**: `RateLimitError` exception + `safe_request(raise_on_429=True)` + per-source `_backoff_until`/`_backoff_minutes` globals. Exponential: doubles on each 429, resets on success, caps at 30min. Now on TOI, xcancel, Trump, and Reuters. Backoff state persists in `feed_cache.json` across restarts.
 - **TOI liveblog URL ordering**: Date-specific URLs must be tried before the base `/liveblog/` URL, which points to a frozen 2020 archive. The structural fallback is too good — it finds entries on stale pages, so URL priority matters.
 - **Always test with live data**: Import validation and syntax checks don't catch data-quality bugs like stale URLs returning old content. Run the actual fetcher and inspect the output.
@@ -121,3 +98,7 @@
 - **In-process smoke testing**: Use Flask's `app.test_client()` for end-to-end route testing (dashboard render, /health, /api/refresh-ai) — exercises the real routes/templates without binding port 8080 or leaving a long-running process. The Bash-launch hook blocks `server.py` as a background process for this reason.
 - **Collapsible day groups**: AI summary column auto-collapses older days during multi-day Yom Tov. Click day separator to expand. CSS `.day-group.collapsed` + JS click handler on `.day-separator`.
 - **Yom Tov → Shabbat merge bug**: The 36-hour window merge in `get_yom_tov_info()` incorrectly absorbs a regular Shabbat that follows a Yom Tov (gap ~23h < 36h threshold). Fix: only merge a "Shabbos" window if it's sandwiched (followed by another Yom Tov window within 36h). Also skip plain "Shabbos" windows in the return logic — `get_shabbos_times()` handles regular Shabbat.
+
+## Reference Docs
+
+- `docs/reference/run-history.md` — run-by-run Shabbos history (graded runs, fixed issues). Read when investigating a past regression or grading pattern.
