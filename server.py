@@ -88,6 +88,7 @@ from config import (
     AI_SUMMARY_MARKET_THRESHOLD, AI_SUMMARY_CANDLE_LIGHTING_PROMPT,
     OIL_TICKER, OIL_FETCH_TIMEOUT,
     SITUATION_BOARD_REGIONS, SITUATION_BOARD_PROMPT,
+    WEATHER_LABEL, WEATHER_LAT, WEATHER_LON, WEATHER_HOURS_SHOWN,
     YOM_TOV_END,
 )
 
@@ -133,6 +134,7 @@ cache: Dict = {
     "toi_liveblog": {"items": [], "last_updated": None, "error": None},
     "think_tanks": {"items": [], "last_updated": None, "error": None},
     "situation_board": {"items": [], "last_updated": None, "error": None},  # AI region cards
+    "weather": {"items": [], "last_updated": None, "error": None},  # hourly forecast strip
     "prediction_markets": {"items": [], "last_updated": None, "error": None},
     "ai_summary": {
         "items": [],
@@ -943,6 +945,62 @@ def fetch_twitter_accounts() -> None:
         cache["twitter_list"]["error"] = "All live wire sources failed"
         logger.warning("Live wire: all sources failed")
 
+
+
+# ============ WEATHER (Open-Meteo hourly forecast) ============
+
+# WMO weather codes → (description, day icon, night icon)
+_WMO_CODES = {
+    0: ("Clear", "☀️", "🌙"), 1: ("Mostly clear", "🌤️", "🌙"), 2: ("Partly cloudy", "⛅", "☁️"),
+    3: ("Overcast", "☁️", "☁️"), 45: ("Fog", "🌫️", "🌫️"), 48: ("Freezing fog", "🌫️", "🌫️"),
+    51: ("Light drizzle", "🌦️", "🌧️"), 53: ("Drizzle", "🌦️", "🌧️"), 55: ("Heavy drizzle", "🌧️", "🌧️"),
+    56: ("Freezing drizzle", "🌧️", "🌧️"), 57: ("Freezing drizzle", "🌧️", "🌧️"),
+    61: ("Light rain", "🌦️", "🌧️"), 63: ("Rain", "🌧️", "🌧️"), 65: ("Heavy rain", "🌧️", "🌧️"),
+    66: ("Freezing rain", "🌧️", "🌧️"), 67: ("Freezing rain", "🌧️", "🌧️"),
+    71: ("Light snow", "🌨️", "🌨️"), 73: ("Snow", "🌨️", "🌨️"), 75: ("Heavy snow", "❄️", "❄️"),
+    77: ("Snow grains", "🌨️", "🌨️"), 80: ("Showers", "🌦️", "🌧️"), 81: ("Showers", "🌧️", "🌧️"),
+    82: ("Violent showers", "🌧️", "🌧️"), 85: ("Snow showers", "🌨️", "🌨️"), 86: ("Snow showers", "🌨️", "🌨️"),
+    95: ("Thunderstorm", "⛈️", "⛈️"), 96: ("Thunderstorm, hail", "⛈️", "⛈️"), 99: ("Thunderstorm, hail", "⛈️", "⛈️"),
+}
+
+
+def fetch_weather() -> None:
+    """Fetch an hourly forecast (conditions, temp, real feel, precip chance).
+
+    Fetches 48 hours so the strip still has future hours to show even if
+    later fetches fail; the dashboard drops hours that have already passed.
+    """
+    url = (
+        "https://api.open-meteo.com/v1/forecast"
+        f"?latitude={WEATHER_LAT}&longitude={WEATHER_LON}"
+        "&hourly=temperature_2m,apparent_temperature,precipitation_probability,weather_code,is_day"
+        "&temperature_unit=fahrenheit&timezone=America%2FNew_York&forecast_hours=48"
+    )
+    response = safe_request(url)
+    if not response:
+        cache["weather"]["error"] = "Weather unavailable"
+        return
+    try:
+        h = response.json()["hourly"]
+        items = []
+        for i, t in enumerate(h["time"]):
+            desc, day_icon, night_icon = _WMO_CODES.get(h["weather_code"][i], ("—", "", ""))
+            hour = datetime.fromisoformat(t).replace(tzinfo=ZoneInfo("America/New_York"))
+            items.append({
+                "timestamp": hour.isoformat(),
+                "hour_display": hour.strftime("%-I %p"),
+                "day_display": hour.strftime("%a"),
+                "temp": round(h["temperature_2m"][i]),
+                "feels_like": round(h["apparent_temperature"][i]),
+                "precip": h["precipitation_probability"][i] or 0,
+                "conditions": desc,
+                "icon": day_icon if h["is_day"][i] else night_icon,
+            })
+        cache["weather"] = {"items": items, "last_updated": datetime.now(), "error": None}
+        logger.info(f"Weather: {len(items)} hourly entries")
+    except (KeyError, ValueError, TypeError, IndexError) as e:
+        logger.warning(f"Weather parse failed: {e}")
+        cache["weather"]["error"] = "Weather unavailable"
 
 
 # ============ TRUMP TRUTH SOCIAL FETCHER ============
@@ -1852,7 +1910,7 @@ def _build_feed_digest() -> str:
     ]
 
     for feed_name, feed_data in cache.items():
-        if feed_name in ("ai_summary", "prediction_markets", "situation_board"):
+        if feed_name in ("ai_summary", "prediction_markets", "situation_board", "weather"):
             continue
         items = feed_data.get("items", [])
         if not items:
@@ -2379,9 +2437,10 @@ def update_all_feeds() -> None:
         "think_tanks": fetch_think_tanks,
         "prediction_markets": fetch_prediction_markets,
         "oil_price": fetch_oil_price,
+        "weather": fetch_weather,
     }
 
-    with ThreadPoolExecutor(max_workers=7) as executor:
+    with ThreadPoolExecutor(max_workers=8) as executor:
         futures = {
             executor.submit(fn): name
             for name, fn in fetchers.items()
@@ -2467,6 +2526,11 @@ def dashboard():
                 i for i in cache[key].get("items", []) if _is_fresh(i.get("timestamp", ""), max_age)
             ]}
 
+    # Weather: only hours from the current hour on (cache may be a few fetches old)
+    hour_start = datetime.now(ZoneInfo("America/New_York")).replace(minute=0, second=0, microsecond=0)
+    weather_hours = [w for w in cache["weather"]["items"]
+                     if datetime.fromisoformat(w["timestamp"]) >= hour_start][:WEATHER_HOURS_SHOWN]
+
     # Merge Live Wire + Trump into a single column, sorted by timestamp
     raw_items = []
     for item in view["twitter_list"]["items"]:
@@ -2483,6 +2547,8 @@ def dashboard():
         "index.html",
         cache=view,
         merged_raw_feeds=raw_items,
+        weather_hours=weather_hours,
+        weather_label=WEATHER_LABEL,
         generated_at=datetime.now(),
         refresh_interval=REFRESH_INTERVAL,
         shabbos_times=shabbos_times,

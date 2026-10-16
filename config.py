@@ -269,3 +269,9 @@ Rules:
 - If oil market context is provided, use it only to calibrate significance; never mention markets or prices.
 - If a PREVIOUS BOARD is provided, judge "trend" relative to it.
 """
+
+# Hourly weather strip at the bottom of the dashboard — Open-Meteo (free, no API key)
+WEATHER_LABEL = "Lawrence, NY 11559"
+WEATHER_LAT = 40.6157
+WEATHER_LON = -73.7296
+WEATHER_HOURS_SHOWN = 24

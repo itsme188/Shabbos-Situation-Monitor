@@ -85,7 +85,7 @@
             display: grid;
             grid-template-columns: repeat(5, 1fr);
             gap: 1.25rem;
-            height: calc(100vh - 150px);
+            height: calc(100vh - 220px);  /* leaves room for the weather strip */
         }
 
         @media (max-width: 1600px) {
@@ -361,6 +361,27 @@
         .acct-ok { background: var(--accent-sage); }
         .acct-fail { background: var(--accent-dusty-rose); }
 
+        .weather-strip {
+            display: flex; align-items: stretch; gap: 0.75rem;
+            margin-top: 0.75rem; padding: 0.35rem 0.5rem;
+            background: var(--bg-card); border: 1px solid var(--border);
+        }
+        .weather-label {
+            flex: 0 0 4.5rem; align-self: center; line-height: 1.3;
+            font-size: 0.6rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted);
+        }
+        .weather-hours { display: flex; gap: 0.25rem; overflow-x: auto; flex: 1; }
+        .weather-hour {
+            flex: 1 0 4.75rem; text-align: center; padding: 0.1rem 0.15rem; line-height: 1.3;
+            border-right: 1px solid var(--border-light); font-variant-numeric: tabular-nums;
+        }
+        .weather-hour:last-child { border-right: none; }
+        .weather-wet { background: #eef4fb; }
+        .wh-time { font-size: 0.65rem; color: var(--text-secondary); }
+        .wh-icon { font-size: 0.85rem; }
+        .wh-temp { font-size: 0.95rem; font-weight: 700; color: var(--text-primary); }
+        .wh-feel { font-size: 0.6rem; color: var(--text-secondary); white-space: nowrap; }
+        .wh-cond { font-size: 0.6rem; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .health-footer {
             display: flex;
             justify-content: center;
@@ -829,6 +850,25 @@
                 {% endif %}
             </div>
         </div>
+    </div>
+
+    <!-- Hourly weather strip -->
+    <div class="weather-strip">
+        <div class="weather-label">{{ weather_label }}</div>
+        {% if weather_hours %}
+        <div class="weather-hours">
+            {% for w in weather_hours %}
+            <div class="weather-hour{% if w.precip >= 50 %} weather-wet{% endif %}" title="{{ w.conditions }}">
+                <div class="wh-time">{% if loop.first or w.hour_display == '12 AM' %}<b>{{ w.day_display }}</b> {% endif %}{{ w.hour_display }}</div>
+                <div class="wh-temp"><span class="wh-icon">{{ w.icon }}</span> {{ w.temp }}°</div>
+                <div class="wh-feel">feels {{ w.feels_like }}° · 💧{{ w.precip }}%</div>
+                <div class="wh-cond">{{ w.conditions }}</div>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="no-items">{{ cache['weather']['error'] or 'Loading weather...' }}</div>
+        {% endif %}
     </div>
 
     <div class="health-footer">
