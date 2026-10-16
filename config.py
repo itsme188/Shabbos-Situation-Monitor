@@ -13,29 +13,63 @@ DEBUG = False
 REFRESH_INTERVAL = 600       # 10 minutes (normal / Shabbos)
 REFRESH_INTERVAL_YOM_TOV = 900  # 15 minutes (Yom Tov — longer to conserve resources)
 
-# OSINT Accounts to Monitor (fetched via Twitter/Nitter/BlueSky fallback chain)
-TWITTER_ACCOUNTS = [
-    "Faytuks",
-    "no_itsmyturn",
-    "manniefabian",
-    "Osint613",
-    "Intel_Sky",
-    "JSchanzer",
-    "IntelCrab",
-    "Global_Mil_Info",
-    "AuroraIntel",
-    # "IsraelRadar_",   # JS-rendered page — unfetchable without headless browser
-    "JoeTruzman",
-    # "YoavLimor",      # JS-rendered page — unfetchable without headless browser
-    "AmichaiStein1",
+# Live Wire column — breaking updates from Telegram channels + outlet RSS.
+# Replaced Twitter scraping (Oct 2026): all free Twitter mirrors died.
+# Telegram: public web preview at t.me/s/<channel>, no login needed.
+# Every source below was verified live 2026-10-16 (posting within the last few hours).
+# State/partisan propaganda channels (PressTV, Intel Slava, QudsN) deliberately excluded;
+# NEXTA dropped (posts in Russian).
+LIVE_WIRE_TELEGRAM = [
+    {"channel": "manniefabian", "label": "Emanuel Fabian (TOI)", "region": "Israel"},
+    {"channel": "englishabuali", "label": "Abu Ali Express", "region": "Israel"},
+    {"channel": "idfofficial", "label": "IDF", "region": "Israel"},
+    {"channel": "Osint613", "label": "Osint613", "region": "Israel"},
+    {"channel": "Middle_East_Spectator", "label": "ME Spectator", "region": "Middle East"},
+    {"channel": "warmonitors", "label": "War Monitor", "region": "World"},
+    {"channel": "ClashReport", "label": "Clash Report", "region": "World"},
+    {"channel": "OSINTdefender", "label": "OSINTdefender", "region": "World"},
+    {"channel": "rnintel", "label": "Rerum Novarum", "region": "World"},
+    {"channel": "kyivindependent_official", "label": "Kyiv Independent", "region": "Russia-Ukraine"},
+    {"channel": "wartranslated", "label": "WarTranslated", "region": "Russia-Ukraine"},
+    {"channel": "insiderpaper", "label": "Insider Paper", "region": "US"},
 ]
+
+# Outlet RSS feeds — slower than Telegram but very stable
+LIVE_WIRE_RSS = [
+    {"name": "Al Jazeera", "url": "https://www.aljazeera.com/xml/rss/all.xml", "region": "Middle East"},
+    {"name": "Iran International", "url": "https://www.iranintl.com/en/feed", "region": "Iran"},
+    {"name": "The National", "url": "https://www.thenationalnews.com/arc/outboundfeeds/rss/?outputType=xml", "region": "Gulf"},
+    {"name": "Haaretz", "url": "https://www.haaretz.com/srv/haaretz-latest-headlines", "region": "Israel"},
+    {"name": "JNS", "url": "https://www.jns.org/feed/", "region": "Israel"},
+    {"name": "Arutz Sheva", "url": "https://www.israelnationalnews.com/Rss.aspx", "region": "Israel"},
+    {"name": "Defense News", "url": "https://www.defensenews.com/arc/outboundfeeds/rss/?outputType=xml", "region": "US"},
+    {"name": "The War Zone", "url": "https://www.twz.com/feed", "region": "US"},
+]
+
+# Keyword → region tags (first match wins; order matters — specific before broad)
+LIVE_WIRE_REGION_KEYWORDS = [
+    ("Yemen/Gulf", ["houthi", "yemen", "red sea", "saudi", "riyadh", "uae", "emirat", "qatar", "bahrain", "hormuz"]),
+    ("Iran", ["iran", "tehran", "irgc", "khamenei"]),
+    ("Lebanon", ["hezbollah", "lebanon", "beirut"]),
+    ("Gaza", ["gaza", "hamas", "rafah", "khan younis"]),
+    ("Israel", ["israel", "idf", "netanyahu", "jerusalem", "tel aviv", "west bank", "knesset"]),
+    ("Syria", ["syria", "damascus"]),
+    ("Russia-Ukraine", ["ukrain", "russia", "kyiv", "moscow", "kremlin", "putin", "zelensk", "donbas", "crimea"]),
+    ("US", ["pentagon", "white house", "trump", "congress", "senate", "u.s.", "washington"]),
+]
+
+LIVE_WIRE_MAX_AGE_HOURS = 12   # drop anything older — this column is for "right now"
+LIVE_WIRE_PER_SOURCE = 6       # cap per source so one chatty channel can't flood the column
+LIVE_WIRE_PER_REGION = 12      # cap per region tag so one busy front can't crowd out the rest
+LIVE_WIRE_MAX_ITEMS = 50       # total items shown
+LIVE_WIRE_TIMEOUT = 45         # seconds for all sources together
 
 # Trump Truth Social
 TRUMP_TRUTH_RSS = "https://trumpstruth.org/feed"
 TRUMP_TWITTER_MIRROR = "TrumpDailyPosts"  # Fallback Twitter account
 
 # Google News Middle East/Iran (more reliable than Reuters RSS)
-REUTERS_MIDEAST_RSS = "https://news.google.com/rss/search?q=Iran+OR+Israel+Middle+East&hl=en-US&gl=US&ceid=US:en"
+REUTERS_MIDEAST_RSS = "https://news.google.com/rss/search?q=Iran+OR+Israel+Middle+East+when:1d&hl=en-US&gl=US&ceid=US:en"
 
 # Fallback: BBC World Middle East RSS (reliable, low rate-limit risk)
 REUTERS_FALLBACK_RSS = "https://feeds.bbci.co.uk/news/world/middle_east/rss.xml"
@@ -45,31 +79,6 @@ REUTERS_FALLBACK_RSS = "https://feeds.bbci.co.uk/news/world/middle_east/rss.xml"
 NITTER_INSTANCES = [
     "xcancel.com",
 ]
-
-# Twitter fallback: Google News RSS when all Twitter/Nitter methods fail
-GOOGLE_NEWS_TWITTER_FALLBACK = "https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
-TWITTER_TOPIC_QUERIES = [
-    "Israel Iran military",
-    "IDF breaking news",
-    "Middle East conflict today",
-]
-TWITTER_SYNDICATION_TIMEOUT = 8   # seconds (fail fast, move to Nitter)
-TWITTER_ACCOUNT_TIMEOUT = 60      # seconds (global timeout for all methods per batch)
-
-# xcancel.com requires this specific User-Agent for RSS feeds
-XCANCEL_USER_AGENT = "mistique"
-
-# TwStalker — Twitter viewer with server-rendered HTML (no JS needed)
-TWSTALKER_BASE = "https://twstalker.com"
-TWSTALKER_TIMEOUT = 10  # seconds — pages are large (~500KB)
-
-# BlueSky (AT Protocol) — open API, no auth needed for public posts
-# Map Twitter usernames to BlueSky handles for accounts that cross-post
-BLUESKY_HANDLES = {
-    "Faytuks": "faytuks.bsky.social",
-    # Other accounts exist on BlueSky but rarely post there
-}
-BLUESKY_API_BASE = "https://public.api.bsky.app/xrpc"
 
 # Times of Israel
 TOI_RSS_URL = "https://www.timesofisrael.com/feed/"
@@ -101,7 +110,6 @@ CACHE_MAX_AGE = 7200  # seconds (2 hours) - ignore cache files older than this
 # Display settings
 MAX_ITEMS_PER_FEED = 15
 NEWS_FEED_MAX_AGE_HOURS = 36  # Skip news items older than this (Middle East, etc.)
-OSINT_MAX_AGE_HOURS = 48      # Skip OSINT posts older than this (prevents ancient posts when sources fail)
 
 # Request settings
 REQUEST_TIMEOUT = 15  # seconds - general
@@ -141,20 +149,14 @@ THINK_TANK_SUMMARY_MAX_NEW = 5  # Max new articles to summarize per cycle (rate 
 POLYMARKET_API_BASE = "https://gamma-api.polymarket.com"
 POLYMARKET_TIMEOUT = 10  # seconds per request
 # Date-scoped markets expire — the fetcher skips closed markets, but refresh
-# this list periodically (slugs verified live 2026-07-17).
+# this list periodically (slugs verified live 2026-07-17; closed July 31
+# markets removed 2026-10-16).
 PREDICTION_MARKETS = [
     {
         "name": "Ground Invasion",
         "event_slug": "will-the-us-invade-iran-before-2027",
         "market_slug": None,
         "type": "escalation",
-    },
-    {
-        # Polymarket's own slug misspells "ceasefire" — copy exactly
-        "name": "Ceasefire by July 31",
-        "event_slug": "us-x-iran-effective-ceasfire-byptptpt-2-week-pause-20260715194822042",
-        "market_slug": "us-x-iran-effective-ceasfire-by-july-31-20260715194822045",
-        "type": "deescalation",
     },
     {
         "name": "Hormuz Normal by Dec 31",
@@ -168,12 +170,6 @@ PREDICTION_MARKETS = [
         "market_slug": None,
         "type": "escalation",
     },
-    {
-        "name": "Airspace Closure by July 31",
-        "event_slug": "iran-full-airspace-closure-byptptpt-20260625195253028",
-        "market_slug": "iran-full-airspace-closure-by-july-31-20260625195254150",
-        "type": "escalation",
-    },
 ]
 AI_SUMMARY_MARKET_THRESHOLD = 5  # min percentage-point change to mention in summary
 
@@ -183,7 +179,7 @@ OIL_TICKER = "CL=F"   # WTI Crude Futures (NYMEX)
 OIL_FETCH_TIMEOUT = 10  # seconds
 
 # AI Summary settings (requires ANTHROPIC_API_KEY environment variable)
-AI_SUMMARY_MAX_TOKENS = 1500
+AI_SUMMARY_MAX_TOKENS = 4000  # headroom: 5.5 models may spend tokens thinking before answering
 
 # Multi-day retention: how many days of AI summaries to keep
 # Set to 3 for 3-day Yom Tov, 1 for regular Shabbos
@@ -200,8 +196,8 @@ AI_SUMMARY_REGULAR_HOURS = [10, 12, 14, 16, 18, 20, 22, 0]  # 2-hour summaries
 AI_SUMMARY_QUIET_HOURS = range(1, 8)                     # 1 AM - 7 AM: no summaries
 
 # Models
-AI_SUMMARY_MORNING_MODEL = "claude-opus-4-8"             # Best quality for morning summary
-AI_SUMMARY_REGULAR_MODEL = "claude-haiku-4-5-20251001"   # Fast/cheap for 2-hour summaries
+AI_SUMMARY_MORNING_MODEL = "claude-opus-5-5"             # Best quality for morning summary
+AI_SUMMARY_REGULAR_MODEL = "claude-haiku-5-5"          # Fast/cheap for 2-hour summaries
 
 AI_SUMMARY_MORNING_PROMPT = """You are a concise news analyst monitoring the Middle East situation.
 Write a comprehensive summary of the key developments from the overnight period (roughly midnight to 8 AM ET).

@@ -11,7 +11,6 @@ Or use: ./start.sh
 import json
 import logging
 import os
-import subprocess
 import tempfile
 import threading
 import time
@@ -23,9 +22,6 @@ from email.utils import parsedate_to_datetime
 from html import unescape
 from zoneinfo import ZoneInfo
 import re
-
-# Rate limiter for twstalker — limits concurrent requests to avoid 429s
-_twstalker_semaphore = threading.Semaphore(2)
 
 from astral import LocationInfo
 from astral.sun import sun
@@ -70,15 +66,14 @@ _last_candle_lighting_summary_date = None
 
 from config import (
     HOST, PORT, DEBUG, REFRESH_INTERVAL, REFRESH_INTERVAL_YOM_TOV,
-    TWITTER_ACCOUNTS, TRUMP_TRUTH_RSS, TRUMP_TWITTER_MIRROR,
+    TRUMP_TRUTH_RSS, TRUMP_TWITTER_MIRROR,
     REUTERS_MIDEAST_RSS, REUTERS_FALLBACK_RSS,
     NITTER_INSTANCES, NITTER_TIMEOUT, TOI_RSS_URL, TOI_LIVEBLOG_URL,
     TOI_LIVEBLOG_DATE_PATTERNS,
-    GOOGLE_NEWS_TWITTER_FALLBACK, TWITTER_TOPIC_QUERIES,
-    TWITTER_SYNDICATION_TIMEOUT, TWITTER_ACCOUNT_TIMEOUT, XCANCEL_USER_AGENT,
-    BLUESKY_HANDLES, BLUESKY_API_BASE,
-    TWSTALKER_BASE, TWSTALKER_TIMEOUT,
-    MAX_ITEMS_PER_FEED, NEWS_FEED_MAX_AGE_HOURS, OSINT_MAX_AGE_HOURS, REQUEST_TIMEOUT,
+    LIVE_WIRE_TELEGRAM, LIVE_WIRE_RSS, LIVE_WIRE_REGION_KEYWORDS,
+    LIVE_WIRE_MAX_AGE_HOURS, LIVE_WIRE_PER_SOURCE, LIVE_WIRE_PER_REGION, LIVE_WIRE_MAX_ITEMS,
+    LIVE_WIRE_TIMEOUT,
+    MAX_ITEMS_PER_FEED, NEWS_FEED_MAX_AGE_HOURS, REQUEST_TIMEOUT,
     LOCATION_LAT, LOCATION_LON, LOCATION_TZ,
     CANDLE_LIGHTING_OFFSET, HAVDALAH_OFFSET,
     CACHE_FILE, CACHE_MAX_AGE,
@@ -765,453 +760,187 @@ def safe_request(url: str, timeout: int = REQUEST_TIMEOUT, raise_on_429: bool = 
         return None
 
 
-# ============ TWITTER ACCOUNTS FETCHER ============
+def _message_text(message) -> str:
+    """Join the text blocks of a Claude API response.
 
-# Track which fetch method last succeeded per account (optimization: try it first)
-_twitter_method_cache: Dict[str, str] = {}
+    Newer models (Haiku/Opus 5.5) can return a thinking block before the
+    answer, so content[0] is not guaranteed to be text.
+    """
+    return "".join(b.text for b in message.content if getattr(b, "type", "") == "text")
+
+
+# ============ LIVE WIRE FETCHER (Telegram channels + news RSS) ============
+# Replaced the Twitter scraping chain (Oct 2026): every free Twitter mirror
+# died (TwStalker behind Cloudflare, xcancel 451, syndication 429). Public
+# Telegram channel pages (t.me/s/<name>) are server-rendered HTML, and outlet
+# RSS feeds are stable. Results land in the "twitter_list" cache key so the
+# on-disk cache format stays compatible.
+
+_WIRE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 "
+                  "(KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+}
+
+
+def _is_fresh(timestamp_str: str, max_age_hours: float) -> bool:
+    """True if the timestamp parses and is within max_age_hours of now.
+
+    Unparseable or missing timestamps count as NOT fresh — on an unattended
+    dashboard, an item we can't date is an item we can't trust to be current.
+    """
+    epoch = _parse_timestamp_to_epoch(timestamp_str)
+    if not epoch:
+        return False
+    return (time.time() - epoch) <= max_age_hours * 3600
+
+
+# Max item age per feed — used by the dashboard and the AI digest
+_FEED_MAX_AGE_HOURS = {
+    "twitter_list": LIVE_WIRE_MAX_AGE_HOURS,
+    "trump": NEWS_FEED_MAX_AGE_HOURS,
+    "reuters": NEWS_FEED_MAX_AGE_HOURS,
+    "toi_liveblog": NEWS_FEED_MAX_AGE_HOURS,
+    "think_tanks": THINK_TANK_MAX_AGE_HOURS,
+}
+
+
+def _detect_region(text: str, default: str) -> str:
+    """Tag an item with a region using keyword matches; fall back to the source's default."""
+    lowered = text.lower()
+    for region, keywords in LIVE_WIRE_REGION_KEYWORDS:
+        if any(k in lowered for k in keywords):
+            return region
+    return default
+
+
+def _fetch_telegram_channel(source: Dict) -> List[Dict]:
+    """Scrape the public web preview of a Telegram channel (newest ~20 posts)."""
+    channel = source["channel"]
+    response = requests.get(f"https://t.me/s/{channel}", headers=_WIRE_HEADERS, timeout=REQUEST_TIMEOUT)
+    response.raise_for_status()
+    soup = BeautifulSoup(response.text, "html.parser")
+
+    items = []
+    for msg in soup.select("div.tgme_widget_message"):
+        time_el = msg.select_one("a.tgme_widget_message_date time[datetime]")
+        text_el = msg.select_one("div.tgme_widget_message_text")
+        if not time_el or not text_el:
+            continue  # media-only posts have no text
+        text = text_el.get_text(separator=" ", strip=True)
+        if not text:
+            continue
+        post_id = msg.get("data-post", "")
+        items.append({
+            "author": source["label"],
+            "text": text[:400] + ("..." if len(text) > 400 else ""),
+            "timestamp": time_el["datetime"],
+            "timestamp_display": format_timestamp(time_el["datetime"]),
+            "link": f"https://t.me/{post_id}" if post_id else f"https://t.me/s/{channel}",
+            "region": _detect_region(text, source["region"]),
+            "wire_type": "telegram",
+        })
+    return items
+
+
+def _fetch_wire_rss(source: Dict) -> List[Dict]:
+    """Fetch an outlet's RSS feed and normalize entries to wire items."""
+    response = requests.get(source["url"], headers=_WIRE_HEADERS, timeout=REQUEST_TIMEOUT)
+    response.raise_for_status()
+    feed = feedparser.parse(response.content)
+
+    items = []
+    for entry in feed.entries:
+        # feedparser gives a UTC struct_time regardless of the raw date format
+        parsed = entry.get("published_parsed") or entry.get("updated_parsed")
+        if not parsed:
+            continue
+        timestamp = datetime(*parsed[:6], tzinfo=ZoneInfo("UTC")).isoformat()
+        title = clean_html(entry.get("title", ""))
+        if not title:
+            continue
+        items.append({
+            "author": source["name"],
+            "text": title[:300] + ("..." if len(title) > 300 else ""),
+            "timestamp": timestamp,
+            "timestamp_display": format_timestamp(timestamp),
+            "link": entry.get("link", ""),
+            "region": _detect_region(title, source["region"]),
+            "wire_type": "rss",
+        })
+    return items
+
+
+def _balance_wire(items: List[Dict]) -> List[Dict]:
+    """Sort newest-first, drop duplicate posts, and cap items per region."""
+    items = sorted(items, key=lambda i: _parse_timestamp_to_epoch(i["timestamp"]), reverse=True)
+    seen_text = set()
+    per_region: Dict[str, int] = {}
+    balanced = []
+    for item in items:
+        key = re.sub(r"\W+", "", item["text"].lower())[:80]
+        if key in seen_text:
+            continue
+        seen_text.add(key)
+        region = item.get("region", "")
+        if per_region.get(region, 0) >= LIVE_WIRE_PER_REGION:
+            continue
+        per_region[region] = per_region.get(region, 0) + 1
+        balanced.append(item)
+    return balanced
 
 
 def fetch_twitter_accounts() -> None:
-    """Fetch tweets from monitored Twitter accounts via web scraping."""
-    logger.info("Fetching Twitter accounts...")
+    """Fetch the Live Wire column: Telegram channels + news RSS, merged by time.
+
+    Name kept for cache/scheduler compatibility (it no longer touches Twitter).
+    """
+    logger.info("Fetching live wire sources...")
+    jobs = (
+        [(s["label"], _fetch_telegram_channel, s) for s in LIVE_WIRE_TELEGRAM]
+        + [(s["name"], _fetch_wire_rss, s) for s in LIVE_WIRE_RSS]
+    )
 
     all_items = []
-    account_status = {}
-
-    with ThreadPoolExecutor(max_workers=6) as executor:
-        futures = {
-            executor.submit(fetch_single_twitter_account, username): username
-            for username in TWITTER_ACCOUNTS
-        }
-        for future in as_completed(futures, timeout=TWITTER_ACCOUNT_TIMEOUT):
-            username = futures[future]
-            try:
-                items = future.result()
-                all_items.extend(items)
-                account_status[username] = len(items) > 0
-            except Exception as e:
-                logger.warning(f"Twitter fetch for @{username} failed: {e}")
-                account_status[username] = False
-
-    if all_items:
-        # Filter out stale items (prevents ancient posts from filling cache when sources fail)
-        now_utc = datetime.now(ZoneInfo("UTC"))
-        max_age = timedelta(hours=OSINT_MAX_AGE_HOURS)
-        fresh_items = []
-        for item in all_items:
-            ts = item.get("timestamp", "")
-            if ts:
+    source_status = {}
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = {executor.submit(fn, src): name for name, fn, src in jobs}
+        try:
+            for future in as_completed(futures, timeout=LIVE_WIRE_TIMEOUT):
+                name = futures[future]
                 try:
-                    item_dt = datetime.fromisoformat(ts)
-                    if item_dt.tzinfo is None:
-                        item_dt = item_dt.replace(tzinfo=ZoneInfo("UTC"))
-                    if (now_utc - item_dt) > max_age:
-                        continue
-                except (ValueError, TypeError):
-                    pass  # Keep items with unparseable timestamps
-            fresh_items.append(item)
-        all_items = fresh_items
+                    # Filter by age BEFORE judging success: a source that only
+                    # returns old posts is a dead source, not a working one.
+                    fresh = [i for i in future.result() if _is_fresh(i["timestamp"], LIVE_WIRE_MAX_AGE_HOURS)]
+                    fresh.sort(key=lambda i: _parse_timestamp_to_epoch(i["timestamp"]), reverse=True)
+                    all_items.extend(fresh[:LIVE_WIRE_PER_SOURCE])
+                    source_status[name] = len(fresh) > 0
+                except Exception as e:
+                    logger.warning(f"Live wire source {name} failed: {e}")
+                    source_status[name] = False
+        except TimeoutError:
+            for name in futures.values():
+                source_status.setdefault(name, False)
+            logger.warning(f"Live wire: timed out after {LIVE_WIRE_TIMEOUT}s; using sources that finished")
 
-        all_items.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+    ok = sum(source_status.values())
+    if all_items:
+        all_items = _balance_wire(all_items)
+        failed = [n for n, good in source_status.items() if not good]
         cache["twitter_list"] = {
-            "items": all_items[:MAX_ITEMS_PER_FEED],
+            "items": all_items[:LIVE_WIRE_MAX_ITEMS],
             "last_updated": datetime.now(),
             "error": None,
-            "account_status": account_status,
-            "source": "twitter",
+            "account_status": source_status,
+            "source": "live_wire",
         }
-        logger.info(f"Got {len(all_items)} total items from Twitter accounts")
+        logger.info(f"Live wire: {len(all_items)} fresh items from {ok}/{len(jobs)} sources"
+                    + (f" (no fresh posts: {', '.join(failed)})" if failed else ""))
     else:
-        # 5th fallback: Google News RSS for the monitored topics
-        logger.info("All Twitter methods failed, trying Google News fallback...")
-        gnews_items = _fetch_twitter_google_news_fallback()
-        if gnews_items:
-            all_items = gnews_items
-            cache["twitter_list"] = {
-                "items": gnews_items[:MAX_ITEMS_PER_FEED],
-                "last_updated": datetime.now(),
-                "error": "Feeds unavailable — showing news via Google News",
-                "account_status": account_status,
-                "source": "google_news",
-            }
-            logger.info(f"Got {len(gnews_items)} items from Google News fallback")
-        else:
-            cache["twitter_list"]["account_status"] = account_status
-            cache["twitter_list"]["source"] = "none"
-            if not cache["twitter_list"]["items"]:
-                cache["twitter_list"]["error"] = "Could not fetch any OSINT feeds"
-            logger.warning("All Twitter account fetches failed (including Google News)")
+        # Keep last-good items, but they'll be age-filtered again at render time
+        cache["twitter_list"]["account_status"] = source_status
+        cache["twitter_list"]["error"] = "All live wire sources failed"
+        logger.warning("Live wire: all sources failed")
 
-
-def _fetch_twitter_google_news_fallback() -> List[Dict]:
-    """Fallback: fetch related news from Google News RSS when Twitter is unavailable."""
-    all_items = []
-    for query in TWITTER_TOPIC_QUERIES:
-        url = GOOGLE_NEWS_TWITTER_FALLBACK.format(query=query.replace(" ", "+"))
-        response = safe_request(url, timeout=10)
-        if response:
-            feed = feedparser.parse(response.content)
-            for entry in feed.entries[:3]:
-                # Google News titles use format "Headline - Source Name"
-                title = entry.get("title", "")
-                source = "News"
-                if " - " in title:
-                    parts = title.rsplit(" - ", 1)
-                    title = parts[0]
-                    source = parts[1] if len(parts) > 1 else "News"
-                all_items.append({
-                    "author": source,
-                    "text": title[:300] + ("..." if len(title) > 300 else ""),
-                    "timestamp": entry.get("published", ""),
-                    "timestamp_display": format_timestamp(entry.get("published", "")),
-                    "link": entry.get("link", ""),
-                })
-    return all_items
-
-
-def _fetch_via_syndication(username: str) -> List[Dict]:
-    """Method 1: Twitter syndication API (fastest when available)."""
-    url = f"https://syndication.twitter.com/srv/timeline-profile/screen-name/{username}"
-    try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        }
-        response = requests.get(url, timeout=TWITTER_SYNDICATION_TIMEOUT, headers=headers)
-        if response.status_code == 200:
-            return parse_twitter_syndication(response.text, username)
-    except Exception as e:
-        logger.debug(f"Syndication failed for @{username}: {e}")
-    return []
-
-
-def _fetch_via_bluesky(username: str) -> List[Dict]:
-    """Method 2: BlueSky AT Protocol API (public, no auth needed)."""
-    bsky_handle = BLUESKY_HANDLES.get(username)
-    if not bsky_handle:
-        return []  # This account isn't on BlueSky
-    try:
-        url = f"{BLUESKY_API_BASE}/app.bsky.feed.getAuthorFeed?actor={bsky_handle}&limit=10"
-        response = requests.get(url, timeout=8)
-        response.raise_for_status()
-        data = response.json()
-
-        items = []
-        for entry in data.get("feed", []):
-            post = entry.get("post", {})
-            record = post.get("record", {})
-            text = record.get("text", "").strip()
-            if not text:
-                continue
-            created_at = record.get("createdAt", "")
-            items.append({
-                "author": username,
-                "text": text[:300] + ("..." if len(text) > 300 else ""),
-                "timestamp": created_at,
-                "timestamp_display": format_timestamp(created_at),
-                "link": f"https://bsky.app/profile/{bsky_handle}",
-            })
-        if items:
-            logger.info(f"BlueSky got {len(items)} posts for @{username}")
-        return items
-    except Exception as e:
-        logger.debug(f"BlueSky failed for @{username}: {e}")
-        return []
-
-
-def _fetch_via_twstalker(username: str) -> List[Dict]:
-    """Method 3: TwStalker HTML scraping (reliable, server-rendered).
-
-    Uses curl subprocess because twstalker blocks Python requests via TLS fingerprinting.
-    """
-    url = f"{TWSTALKER_BASE}/{username}"
-    try:
-        with _twstalker_semaphore:
-            result = subprocess.run(
-                ["curl", "-s", "--connect-timeout", "8", "--max-time", str(TWSTALKER_TIMEOUT),
-                 "-H", "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-                 url],
-                capture_output=True, text=True, timeout=TWSTALKER_TIMEOUT + 5,
-            )
-        html = result.stdout
-        if not html or len(html) < 1000:
-            return []
-        return parse_twstalker_profile(html, username)
-    except Exception as e:
-        logger.debug(f"TwStalker failed for @{username}: {e}")
-        return []
-
-
-def _relative_to_iso(relative_str: str) -> str:
-    """Convert a relative timestamp like '3 hours ago' to an approximate ISO string.
-
-    Used for TwStalker results which only provide relative times.
-    The resulting timestamps are approximate (±1 unit) but sufficient for sort ordering.
-    """
-    if not relative_str:
-        return ""
-    m = re.match(r'(\d+)\s+(second|minute|hour|day|week|month)s?\s+ago', relative_str, re.I)
-    if not m:
-        return ""
-    amount, unit = int(m.group(1)), m.group(2).lower()
-    delta_map = {
-        "second": timedelta(seconds=amount),
-        "minute": timedelta(minutes=amount),
-        "hour": timedelta(hours=amount),
-        "day": timedelta(days=amount),
-        "week": timedelta(weeks=amount),
-        "month": timedelta(days=amount * 30),
-    }
-    approx_time = datetime.now() - delta_map.get(unit, timedelta(0))
-    return approx_time.isoformat()
-
-
-def parse_twstalker_profile(html: str, username: str) -> List[Dict]:
-    """Parse TwStalker profile page for tweets."""
-    items = []
-    # Split by activity-group1 blocks (each is a tweet)
-    blocks = re.split(r'<div class="activity-group1">', html)
-
-    for block in blocks[1:]:  # Skip pre-content
-        if len(items) >= 5:
-            break
-        try:
-            # Extract tweet link and ID
-            link_match = re.search(r'href="(/([^/]+)/status/(\d+))"', block)
-            if not link_match:
-                continue
-            original_author = link_match.group(2)
-            link = f"https://twitter.com{link_match.group(1)}"
-
-            # Extract relative timestamp
-            time_match = re.search(
-                r'(\d+ (?:seconds?|minutes?|hours?|days?|weeks?|months?) ago)',
-                block,
-            )
-            timestamp_display = time_match.group(1) if time_match else ""
-
-            # Extract text: strip HTML tags, SVGs, scripts
-            clean = re.sub(r'<script[^>]*>.*?</script>', '', block, flags=re.S)
-            clean = re.sub(r'<style[^>]*>.*?</style>', '', clean, flags=re.S)
-            clean = re.sub(r'<svg[^>]*>.*?</svg>', '', clean, flags=re.S)
-            clean = re.sub(r'<[^>]+>', '\n', clean)
-            clean = unescape(clean)
-
-            # Filter to lines that look like tweet content
-            lines = [l.strip() for l in clean.split('\n') if l.strip()]
-            text_lines = [
-                l for l in lines
-                if len(l) > 20
-                and 'ago' not in l.lower()
-                and not re.match(r'^[\d,\.]+$', l)
-                and not l.startswith('http')
-            ]
-            text = ' '.join(text_lines[:3]).strip()
-            if not text:
-                continue  # Skip media-only tweets
-
-            text = (lambda t: t[:300] + ("..." if len(t) > 300 else ""))(text)
-
-            # Show original author if it's a retweet
-            author = username
-            if original_author.lower() != username.lower():
-                text = f"RT @{original_author}: {text}"
-
-            items.append({
-                "author": author,
-                "text": text,
-                "timestamp": _relative_to_iso(timestamp_display),  # Approximate ISO for sorting
-                "timestamp_display": timestamp_display,
-                "link": link,
-            })
-        except Exception:
-            continue
-
-    return items
-
-
-def _fetch_via_nitter_html(username: str) -> List[Dict]:
-    """Method 5: Nitter HTML scraping (last resort)."""
-    for instance in get_healthy_nitter_instances()[:4]:
-        # Respect xcancel backoff from RSS 429s
-        if "xcancel" in instance and _xcancel_backoff_until and datetime.now() < _xcancel_backoff_until:
-            continue
-        try:
-            nitter_url = f"https://{instance}/{username}"
-            response = safe_request(nitter_url, timeout=NITTER_TIMEOUT)
-            if response:
-                items = parse_nitter_profile(response.text, username)
-                if items:
-                    record_nitter_success(instance)
-                    return items
-            record_nitter_failure(instance)
-        except Exception as e:
-            record_nitter_failure(instance)
-            logger.debug(f"Nitter {instance} failed for @{username}: {e}")
-            continue
-    return []
-
-
-def fetch_single_twitter_account(username: str) -> List[Dict]:
-    """Fetch tweets from a single account via multiple fallback methods."""
-    logger.info(f"Fetching @{username}...")
-
-    # Define methods in priority order
-    methods = [
-        ("syndication", lambda: _fetch_via_syndication(username)),
-        ("twstalker", lambda: _fetch_via_twstalker(username)),
-        ("bluesky", lambda: _fetch_via_bluesky(username)),
-        ("nitter_rss", lambda: fetch_twitter_via_nitter_rss(username)),
-        ("nitter_html", lambda: _fetch_via_nitter_html(username)),
-    ]
-
-    # Try last-successful method first (optimization)
-    last_ok = _twitter_method_cache.get(username)
-    if last_ok:
-        methods.sort(key=lambda m: 0 if m[0] == last_ok else 1)
-
-    for method_name, method_fn in methods:
-        try:
-            items = method_fn()
-            if items:
-                _twitter_method_cache[username] = method_name
-                logger.info(f"Got {len(items)} tweets from @{username} via {method_name}")
-                return items
-        except Exception as e:
-            logger.debug(f"{method_name} failed for @{username}: {e}")
-            continue
-
-    logger.warning(f"All methods failed for @{username}")
-    return []
-
-
-def fetch_twitter_via_nitter_rss(username: str) -> List[Dict]:
-    """Try fetching tweets via Nitter RSS feeds (more reliable than HTML scraping)."""
-    global _xcancel_backoff_until, _xcancel_backoff_minutes
-
-    for instance in get_healthy_nitter_instances()[:3]:
-        try:
-            rss_url = f"https://{instance}/{username}/rss"
-            # xcancel.com requires "mistique" User-Agent for RSS access
-            if "xcancel" in instance:
-                # Skip if in backoff period from a previous 429
-                if _xcancel_backoff_until and datetime.now() < _xcancel_backoff_until:
-                    logger.debug(f"xcancel: skipping @{username}, backoff active")
-                    continue
-                try:
-                    response = requests.get(
-                        rss_url,
-                        timeout=NITTER_TIMEOUT,
-                        headers={"User-Agent": XCANCEL_USER_AGENT},
-                    )
-                    if response.status_code == 429:
-                        _xcancel_backoff_until = datetime.now() + timedelta(minutes=_xcancel_backoff_minutes)
-                        logger.warning(f"xcancel rate-limited (429), backing off for {_xcancel_backoff_minutes}m")
-                        _xcancel_backoff_minutes = min(_xcancel_backoff_minutes * 2, 30)
-                        record_nitter_failure(instance)
-                        continue
-                    response.raise_for_status()
-                    # Reset backoff on success
-                    _xcancel_backoff_until = None
-                    _xcancel_backoff_minutes = 5
-                except requests.exceptions.HTTPError:
-                    logger.debug(f"xcancel RSS failed for @{username}: HTTP error")
-                    record_nitter_failure(instance)
-                    continue
-                except Exception as e:
-                    logger.debug(f"xcancel RSS failed for @{username}: {e}")
-                    record_nitter_failure(instance)
-                    continue
-            else:
-                response = safe_request(rss_url, timeout=NITTER_TIMEOUT)
-            if response:
-                feed = feedparser.parse(response.content)
-                if feed.entries:
-                    # Check first entry for error content (e.g. "RSS reader not yet whitelisted")
-                    first_text = clean_html(
-                        feed.entries[0].get("title", "") or feed.entries[0].get("description", "")
-                    )
-                    if _is_nitter_error_content(first_text):
-                        logger.warning(f"Nitter RSS {instance} returned error content: {first_text[:80]}")
-                        record_nitter_failure(instance)
-                        continue
-
-                    record_nitter_success(instance)
-                    items = []
-                    for entry in feed.entries[:5]:
-                        items.append({
-                            "author": username,
-                            "text": (lambda t: t[:300] + ("..." if len(t) > 300 else ""))(clean_html(entry.get("title", "") or entry.get("description", ""))),
-                            "timestamp": entry.get("published", ""),
-                            "timestamp_display": format_timestamp(entry.get("published", "")),
-                            "link": entry.get("link", f"https://twitter.com/{username}"),
-                        })
-                    if items:
-                        return items
-            record_nitter_failure(instance)
-        except Exception:
-            record_nitter_failure(instance)
-            continue
-    return []
-
-
-def parse_twitter_syndication(html: str, username: str) -> List[Dict]:
-    """Parse Twitter's syndication timeline response."""
-    items = []
-    soup = BeautifulSoup(html, "html.parser")
-
-    # Twitter syndication uses specific classes for tweets
-    tweets = soup.select(".timeline-Tweet")
-
-    for tweet in tweets[:5]:  # Limit per account
-        try:
-            text_elem = tweet.select_one(".timeline-Tweet-text")
-            time_elem = tweet.select_one("time")
-
-            if text_elem:
-                items.append({
-                    "author": username,
-                    "text": (lambda t: t[:300] + ("..." if len(t) > 300 else ""))(text_elem.get_text(strip=True)),
-                    "timestamp": time_elem.get("datetime", "") if time_elem else "",
-                    "timestamp_display": time_elem.get_text(strip=True) if time_elem else "",
-                    "link": f"https://twitter.com/{username}",
-                })
-        except Exception:
-            continue
-
-    return items
-
-
-def parse_nitter_profile(html: str, username: str) -> List[Dict]:
-    """Parse Nitter profile page HTML."""
-    items = []
-    soup = BeautifulSoup(html, "html.parser")
-
-    tweets = soup.select(".timeline-item")
-
-    for tweet in tweets:
-        # Skip pinned tweets
-        if tweet.select_one(".pinned"):
-            continue
-
-        if len(items) >= 5:  # Limit per account
-            break
-        try:
-            content_elem = tweet.select_one(".tweet-content")
-            time_elem = tweet.select_one(".tweet-date a")
-
-            if content_elem:
-                items.append({
-                    "author": username,
-                    "text": content_elem.get_text(strip=True),
-                    "timestamp": time_elem.get("title", "") if time_elem else "",
-                    "timestamp_display": time_elem.get_text(strip=True) if time_elem else "",
-                    "link": f"https://twitter.com/{username}",
-                })
-        except Exception:
-            continue
-
-    return items
 
 
 # ============ TRUMP TRUTH SOCIAL FETCHER ============
@@ -1246,8 +975,8 @@ def fetch_trump() -> None:
                 _raw = extract_text_with_links(content)
                 text = (_raw[:500] + ("..." if len(_raw) > 500 else "")).strip()
 
-                # Skip empty posts (media-only, retruths with no text)
-                if not text:
+                # Skip empty posts (media-only, retruths with no text) and stale ones
+                if not text or not _is_fresh(entry.get("published", ""), NEWS_FEED_MAX_AGE_HOURS):
                     continue
 
                 items.append({
@@ -1333,8 +1062,6 @@ def fetch_reuters() -> None:
         return
 
     logger.info("Fetching Middle East news...")
-    now = datetime.now(ZoneInfo("UTC"))
-    max_age = timedelta(hours=NEWS_FEED_MAX_AGE_HOURS)
 
     # Try sources in order: primary Google News, then BBC fallback
     sources = [
@@ -1355,17 +1082,10 @@ def fetch_reuters() -> None:
             feed = feedparser.parse(response.content)
             if feed.entries:
                 items = []
-                for entry in feed.entries[:MAX_ITEMS_PER_FEED * 2]:  # Fetch extra to compensate for age filtering
-                    # Filter out stale entries
+                for entry in feed.entries:
                     published = entry.get("published", "")
-                    try:
-                        pub_dt = parsedate_to_datetime(published)
-                        if pub_dt.tzinfo is None:
-                            pub_dt = pub_dt.replace(tzinfo=ZoneInfo("UTC"))
-                        if (now - pub_dt) > max_age:
-                            continue
-                    except (ValueError, TypeError):
-                        pass  # Unparseable timestamps pass through
+                    if not _is_fresh(published, NEWS_FEED_MAX_AGE_HOURS):
+                        continue  # stale or undated
                     items.append({
                         "title": entry.get("title", ""),
                         "summary": clean_html(entry.get("summary", ""))[:250],
@@ -1373,8 +1093,9 @@ def fetch_reuters() -> None:
                         "timestamp_display": format_timestamp(published),
                         "link": entry.get("link", ""),
                     })
-                    if len(items) >= MAX_ITEMS_PER_FEED:
-                        break
+                # Google News returns relevance order, not time order
+                items.sort(key=lambda i: _parse_timestamp_to_epoch(i["timestamp"]), reverse=True)
+                items = items[:MAX_ITEMS_PER_FEED]
 
                 error_msg = None if source_name == "Google News" else f"Primary source unavailable — showing {source_name}"
                 cache["reuters"] = {
@@ -1424,6 +1145,8 @@ def fetch_toi() -> None:
     if response:
         feed = feedparser.parse(response.content)
         for entry in feed.entries[:10]:
+            if not _is_fresh(entry.get("published", ""), NEWS_FEED_MAX_AGE_HOURS):
+                continue
             rss_items.append({
                 "title": entry.get("title", ""),
                 "summary": clean_html(entry.get("summary", ""))[:200],
@@ -1478,8 +1201,9 @@ def fetch_toi() -> None:
         logger.warning(f"TOI rate-limited, backing off for {_toi_backoff_minutes}m")
         _toi_backoff_minutes = min(_toi_backoff_minutes * 2, 30)  # Double up to 30m cap
 
-    # Combine: liveblog items first, then RSS
+    # Combine liveblog + RSS, newest first
     items = liveblog_items + rss_items
+    items.sort(key=lambda i: _parse_timestamp_to_epoch(i.get("timestamp", "")), reverse=True)
 
     if items:
         cache["toi_liveblog"] = {
@@ -1791,11 +1515,11 @@ def _summarize_article(title: str, text: str, api_key: str) -> str:
         client = anthropic.Anthropic(api_key=api_key)
         message = client.messages.create(
             model=AI_SUMMARY_REGULAR_MODEL,  # Haiku — fast and cheap
-            max_tokens=300,
+            max_tokens=1000,
             system="You are a concise analyst. Summarize the following article in 1-2 short paragraphs. Focus on the key argument, findings, or implications. No preamble.",
             messages=[{"role": "user", "content": f"Article: {title}\n\n{text}"}],
         )
-        text = message.content[0].text.strip()
+        text = _message_text(message).strip()
         # Strip markdown headers the model sometimes adds
         text = re.sub(r'^#+\s*summary\s*\n*', '', text, flags=re.IGNORECASE).strip()
         # Reject responses where the LLM says it can't access the content
@@ -1844,6 +1568,32 @@ def _scrape_think_tank_page(feed_def: dict) -> list:
     return items
 
 
+# Publish dates of scraped articles, cached by URL (dates don't change)
+_scraped_date_cache: Dict[str, date] = {}
+
+
+def _scraped_publish_date(url: str) -> Optional[date]:
+    """Read an article's publish date from its citation_publication_date meta tag.
+
+    CSIS format: "Thu, 10/15/2026 - 12:00" (the time is a placeholder, so only
+    the date is used). Returns None when the tag is missing or unparseable.
+    """
+    if url in _scraped_date_cache:
+        return _scraped_date_cache[url]
+    response = safe_request(url)
+    if not response:
+        return None  # don't cache — retry next cycle
+    meta = BeautifulSoup(response.content, "html.parser").find(
+        "meta", attrs={"name": "citation_publication_date"})
+    pub = None
+    if meta:
+        m = re.search(r"(\d{1,2})/(\d{1,2})/(\d{4})", meta.get("content", ""))
+        if m:
+            pub = date(int(m.group(3)), int(m.group(1)), int(m.group(2)))
+    _scraped_date_cache[url] = pub
+    return pub
+
+
 def fetch_think_tanks() -> None:
     """Fetch strategic analysis articles from think tanks (FDD, CSIS, ISW).
 
@@ -1867,14 +1617,21 @@ def fetch_think_tanks() -> None:
             if not scraped:
                 errors.append(f"{feed_def['name']}: no articles found")
             for item in scraped:
-                # Use fetch time as fallback timestamp so age filtering works
-                ts = item.get("timestamp", "") or now.isoformat()
+                # Real publish date from the article page — never the fetch time,
+                # which made old articles look brand new
+                pub_date = _scraped_publish_date(item["link"])
+                if not pub_date:
+                    continue
+                ts = datetime.combine(pub_date, datetime.min.time().replace(hour=12),
+                                      ZoneInfo("America/New_York")).isoformat()
+                if (now - datetime.fromisoformat(ts)) > max_age:
+                    continue
                 all_items.append({
                     "title": item["title"],
                     "summary": "",
                     "raw_content": "",
                     "timestamp": ts,
-                    "timestamp_display": format_timestamp(ts),
+                    "timestamp_display": pub_date.strftime("%a %b %-d"),  # date only — page has no time
                     "link": item["link"],
                     "source": item["source"],
                     "author": "",
@@ -1934,6 +1691,7 @@ def fetch_think_tanks() -> None:
             logger.warning(f"Think tanks: all sources failed: {'; '.join(errors)}")
         return
 
+    all_items.sort(key=lambda i: _parse_timestamp_to_epoch(i.get("timestamp", "")), reverse=True)
     all_items = all_items[:MAX_ITEMS_PER_FEED]
 
     # AI-summarize articles (use cached summaries when available)
@@ -2101,16 +1859,23 @@ def _build_feed_digest() -> str:
         # Label sections distinctly so the LLM knows the source type
         label_map = {
             "think_tanks": "STRATEGIC ANALYSIS (Think Tanks — FDD, CSIS, ISW)",
-            "twitter_list": "OSINT FEEDS",
+            "twitter_list": "LIVE WIRE (Telegram channels + outlet RSS, multi-region)",
             "trump": "TRUMP STATEMENTS",
             "reuters": "MIDDLE EAST NEWS",
             "toi_liveblog": "TIMES OF ISRAEL",
         }
+        max_age = _FEED_MAX_AGE_HOURS.get(feed_name, NEWS_FEED_MAX_AGE_HOURS)
+        items = [i for i in items if _is_fresh(i.get("timestamp", ""), max_age)]
+        if not items:
+            continue
         feed_text_parts.append(f"\n--- {label_map.get(feed_name, feed_name.upper())} ---")
-        for item in items[:10]:
+        limit = 30 if feed_name == "twitter_list" else 10
+        for item in items[:limit]:
             parts = []
             if item.get("author"):
                 parts.append(f"@{item['author']}")
+            if item.get("region"):
+                parts.append(f"<{item['region']}>")
             if item.get("timestamp_display"):
                 parts.append(f"[{item['timestamp_display']}]")
             if item.get("title"):
@@ -2161,7 +1926,7 @@ def _generate_morning_summary(api_key: str) -> None:
                 }],
             )
 
-            summary_text = message.content[0].text.strip()
+            summary_text = _message_text(message).strip()
             gen_time = datetime.now()
             gen_et = datetime.now(ZoneInfo("America/New_York"))
 
@@ -2242,7 +2007,7 @@ def _generate_regular_summary(api_key: str) -> None:
                 }],
             )
 
-            summary_text = message.content[0].text
+            summary_text = _message_text(message)
             bullets = _parse_ai_bullets(summary_text)
 
             gen_time = datetime.now()
@@ -2433,7 +2198,7 @@ def _generate_candle_lighting_summary(api_key: str) -> None:
                 }],
             )
 
-            summary_text = message.content[0].text.strip()
+            summary_text = _message_text(message).strip()
             gen_time = datetime.now()
             gen_et = datetime.now(ZoneInfo("America/New_York"))
 
@@ -2623,11 +2388,20 @@ def dashboard():
         except Exception as e:
             logger.debug(f"Yom Tov detection failed: {e}")
 
-    # Merge OSINT + Trump feeds into a single "Raw Feeds" list, sorted by timestamp
+    # Render-time freshness guard: fetchers keep last-good items when a source
+    # fails, so re-filter by age here — nothing stale ever reaches the screen.
+    view = dict(cache)
+    for key, max_age in _FEED_MAX_AGE_HOURS.items():
+        if key in cache:
+            view[key] = {**cache[key], "items": [
+                i for i in cache[key].get("items", []) if _is_fresh(i.get("timestamp", ""), max_age)
+            ]}
+
+    # Merge Live Wire + Trump into a single column, sorted by timestamp
     raw_items = []
-    for item in cache["twitter_list"]["items"][:10]:
+    for item in view["twitter_list"]["items"]:
         raw_items.append({**item, "feed_source": "osint"})
-    for item in cache["trump"]["items"][:8]:
+    for item in view["trump"]["items"][:8]:
         raw_items.append({**item, "feed_source": "trump"})
     # Sort by parsed epoch (handles mixed formats: ISO, RFC 2822, BlueSky display)
     raw_items.sort(key=lambda x: _parse_timestamp_to_epoch(x.get("timestamp", "")), reverse=True)
@@ -2637,7 +2411,7 @@ def dashboard():
 
     return render_template(
         "index.html",
-        cache=cache,
+        cache=view,
         merged_raw_feeds=raw_items,
         generated_at=datetime.now(),
         refresh_interval=REFRESH_INTERVAL,

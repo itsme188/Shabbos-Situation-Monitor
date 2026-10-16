@@ -14,7 +14,7 @@
 
 ## Key Files
 - `server.py` — main app (~1900 lines), routes, scheduler, all feed fetchers
-- `config.py` — HOST, PORT, REFRESH_INTERVAL, feed URLs, OSINT account lists, think tank feeds, AI prompts, Yom Tov settings
+- `config.py` — HOST, PORT, REFRESH_INTERVAL, feed URLs, Live Wire sources (Telegram + RSS), think tank feeds, AI prompts, Yom Tov settings
 - `start.sh` — production launcher with crash recovery
 - `launcher.applescript` — macOS one-click startup (health-polls, reuses Safari tabs, error dialog)
 - `templates/index.html` — dashboard template
@@ -27,15 +27,14 @@
 ## Feed Architecture
 - Each feed has: fetcher function, cache entry, error state, last_updated timestamp
 - `update_all_feeds()` runs all fetchers concurrently via ThreadPoolExecutor
-- **Dashboard layout**: Strategic Analysis | Middle East | TOI | Raw Feeds (OSINT+Trump merged) | AI Summary
+- **Dashboard layout**: Strategic Analysis | Middle East | TOI | Live Wire (Telegram+RSS+Trump) | AI Summary
 - **Think tank feed** (`think_tanks` cache key): FDD (direct RSS), CSIS (scrape `csis.org/analysis`), ISW (scrape `understandingwar.org/publications`). Google News RSS article URLs don't work (JS-only redirect). Each article is AI-summarized via Haiku (cached by URL, max 5 new/cycle). Recency filter: `THINK_TANK_MAX_AGE_HOURS = 36`.
-- **Raw Feeds column**: OSINT + Trump pre-merged in `dashboard()` route, sorted by timestamp, tagged with `feed_source` key
-- **OSINT** backed by `twitter_list` cache key — internal names kept for cache compatibility
-- OSINT uses 5-tier fallback: syndication → TwStalker → BlueSky → Nitter RSS → Nitter HTML → Google News
-- **TwStalker** (`twstalker.com`): primary source, works for 11 active accounts. Uses `curl` subprocess (not Python `requests`) because TwStalker blocks via TLS fingerprinting. `threading.Semaphore(2)` rate-limits concurrent requests. IsraelRadar_ and YoavLimor use JS-rendered pages (unfetchable without headless browser)
-- BlueSky (`public.api.bsky.app`): open API, no auth. Only Faytuks is active on BlueSky (others dormant). `BLUESKY_HANDLES` in config
-- Nitter: only xcancel.com remains (5 dead instances removed Mar 2026). RSS returns "not whitelisted"; HTML scraping rate-limited
-- When all Twitter methods fail, Google News fallback fires — extracts actual source name from title, marks `source: "google_news"` for dynamic column header
+- **Live Wire column** (was "Raw Feeds"/OSINT): Telegram channels (`t.me/s/<channel>` public HTML) + outlet RSS, merged with Trump posts in `dashboard()`. Config: `LIVE_WIRE_TELEGRAM`, `LIVE_WIRE_RSS`, `LIVE_WIRE_REGION_KEYWORDS`. Each item gets a region tag (keyword match, else source default). `_balance_wire()` sorts, dedupes, caps per region (`LIVE_WIRE_PER_REGION`) so one busy front can't crowd out others.
+- Live Wire still uses the `twitter_list` cache key and `fetch_twitter_accounts()` name for cache compatibility
+- **Twitter scraping removed (Oct 2026)**: TwStalker went behind Cloudflare, xcancel returns 451, syndication 429, BlueSky accounts dormant. Don't resurrect without a paid API or headless browser.
+- **Freshness rules**: `_is_fresh()` treats undated items as stale. Every fetcher age-filters and sorts by epoch; `dashboard()` and `_build_feed_digest()` re-filter via `_FEED_MAX_AGE_HOURS` so preserved last-good cache can never show or feed stale items.
+- Scraped think tank items (CSIS) get the real date from `<meta name="citation_publication_date">` (date only, shown as "Thu Oct 15") — never the fetch time.
+- Blocked as of Oct 2026 (403 even with browser UA): TOI liveblog (RSS still works), ISW publications page.
 - ~~Polymarket~~ — fully removed in PR #7
 - Trump RSS (`trumpstruth.org/feed`): many entries are media-only (`<p></p>` body) — always extract text before deciding to include
 - Reuters has BBC World Middle East RSS (`REUTERS_FALLBACK_RSS`) as fallback source
@@ -55,7 +54,8 @@
   - 1-7 AM: quiet hours, no generation
   - 8 AM: morning summary (Opus, multi-paragraph prose covering last 8 hours)
   - 10 AM, 12 PM, 2 PM, 4 PM, 6 PM, 8 PM, 10 PM, 12 AM: regular 2-hour bullet summaries (Haiku)
-- **Two-model strategy**: Haiku for regular 2-hour summaries (fast/cheap), Opus for morning summary (best quality)
+- **Two-model strategy**: Haiku 5.5 for regular 2-hour summaries + think tank summaries, Opus 5.5 for morning summary
+- 5.5 models may return a `thinking` block before text — always read responses via `_message_text()`, never `content[0].text`. Token budgets raised (4000 / 1000) to leave room for thinking.
 - Prompt requires `[Category] Day H:MM AM/PM - description` format. Parser regex handles both old 24-hour and new AM/PM formats, dash variants `[-–—]`
 - All times in ET. Feed digest includes timezone context header for the LLM
 - Valid categories: Military, Diplomatic, Political, Breaking, Strategic
