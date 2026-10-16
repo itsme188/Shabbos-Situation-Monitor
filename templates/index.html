@@ -152,6 +152,12 @@
         .feed-header.toi .indicator { background: var(--accent-moss); }
         .feed-header.ai-summary .indicator { background: var(--accent-sand); }
 
+        .board-region { font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; font-size: 0.7rem; color: var(--text-primary); }
+        .board-trend { font-size: 0.65rem; font-weight: 700; padding: 0.1rem 0.4rem; border-radius: 2px; }
+        .trend-escalating { color: #9b2c2c; background: #fde8e8; }
+        .trend-stable { color: var(--text-secondary); background: var(--bg-header); }
+        .trend-de-escalating { color: #276749; background: #e6f4ea; }
+        .board-last { margin-top: 0.35rem; font-size: 0.7rem; color: var(--text-secondary); font-style: italic; }
         .wire-link { color: inherit; text-decoration: none; }
         .wire-link:hover { text-decoration: underline; }
         .source-badge {
@@ -533,7 +539,7 @@
     <header>
         <h1>Shabbos Situation Monitor</h1>
         <div class="status">
-            {% for feed_key, feed_label in [('think_tanks', 'Analysis'), ('reuters', 'News'), ('toi_liveblog', 'TOI'), ('twitter_list', 'Wire'), ('ai_summary', 'AI')] %}
+            {% for feed_key, feed_label in [('situation_board', 'Board'), ('reuters', 'News'), ('toi_liveblog', 'TOI'), ('twitter_list', 'Wire'), ('ai_summary', 'AI')] %}
             {% if cache.get(feed_key) %}
             {% set lu = cache[feed_key]['last_updated'] %}
             {% set age = ((generated_at - lu).total_seconds() / 60)|int if lu else -1 %}
@@ -565,38 +571,40 @@
     </header>
 
     <div class="grid">
-        <!-- Strategic Analysis Column (Think Tanks) -->
+        <!-- Situation Board Column (AI per-region status cards) -->
         <div class="feed">
             <div class="feed-header think-tanks">
-                <span><span class="indicator"></span>Strategic Analysis</span>
+                <span><span class="indicator"></span>Situation Board</span>
                 <span class="feed-count">
-                    {{ cache['think_tanks']['items']|length }}
-                    {{ stale_badge(cache['think_tanks']['last_updated'], generated_at) }}
+                    {% if cache['situation_board']['last_updated'] %}{{ cache['situation_board']['last_updated'].strftime('%a %-I:%M %p') }}{% endif %}
+                    {% set blu = cache['situation_board']['last_updated'] %}
+                    {% if blu and ((generated_at - blu).total_seconds() / 60) > 150 %}
+                    <span class="stale-warning stale-severe">STALE {{ "%.1f"|format((generated_at - blu).total_seconds() / 3600) }}h</span>
+                    {% endif %}
                 </span>
             </div>
-            <div class="feed-content" id="think-tanks-scroll">
-                {% if cache['think_tanks']['error'] and not cache['think_tanks']['items'] %}
-                    <div class="error-message">{{ cache['think_tanks']['error'] }}</div>
-                {% elif not cache['think_tanks']['items'] %}
-                    <div class="no-items">Fetching think tank articles...</div>
+            <div class="feed-content" id="board-scroll">
+                {% if not cache['situation_board']['items'] %}
+                    <div class="no-items">
+                        {% if cache['situation_board']['error'] %}{{ cache['situation_board']['error'] }}
+                        {% else %}Board builds with each AI summary (turn AI on, or press ↻){% endif %}
+                    </div>
                 {% else %}
-                    {% if cache['think_tanks']['error'] %}
-                    <div class="cached-warning">{{ cache['think_tanks']['error'] }}</div>
+                    {% if cache['situation_board']['error'] %}
+                    <div class="cached-warning">{{ cache['situation_board']['error'] }} — showing previous board</div>
                     {% endif %}
-                    {% for item in cache['think_tanks']['items'] %}
-                    <div class="feed-item">
+                    {% for card in cache['situation_board']['items'] %}
+                    <div class="feed-item board-card">
                         <div class="item-meta">
-                            <span class="item-author">
-                                <span class="source-badge">{{ item.source }}</span>
-                                {% if item.author %} {{ item.author }}{% endif %}
+                            <span class="board-region">{{ card.region }}</span>
+                            <span class="board-trend trend-{{ card.trend }}">
+                                {% if card.trend == 'escalating' %}▲ Escalating{% elif card.trend == 'de-escalating' %}▼ De-escalating{% else %}● Stable{% endif %}
                             </span>
-                            <span class="item-time">{{ item.timestamp_display }}</span>
                         </div>
-                        {% if item.title %}
-                        <div class="item-title">{{ item.title }}</div>
-                        {% endif %}
-                        {% if item.summary %}
-                        <div class="item-text">{{ item.summary }}</div>
+                        {% if card.headline %}<div class="item-title">{{ card.headline }}</div>{% endif %}
+                        <div class="item-text">{{ card.summary }}</div>
+                        {% if card.last_event %}
+                        <div class="board-last">Last major: {{ card.last_event }}{% if card.last_event_time %} · {{ card.last_event_time }}{% endif %}</div>
                         {% endif %}
                     </div>
                     {% endfor %}
@@ -959,7 +967,7 @@
                 el.scrollTop = currentScroll;
             }, intervalTime);
         }
-        setupAutoScroll('think-tanks-scroll');
+        setupAutoScroll('board-scroll');
         setupAutoScroll('reuters-scroll');
         setupAutoScroll('toi-scroll');
         setupAutoScroll('raw-feeds-scroll');

@@ -87,6 +87,7 @@ from config import (
     POLYMARKET_API_BASE, POLYMARKET_TIMEOUT, PREDICTION_MARKETS,
     AI_SUMMARY_MARKET_THRESHOLD, AI_SUMMARY_CANDLE_LIGHTING_PROMPT,
     OIL_TICKER, OIL_FETCH_TIMEOUT,
+    SITUATION_BOARD_REGIONS, SITUATION_BOARD_PROMPT,
     YOM_TOV_END,
 )
 
@@ -131,6 +132,7 @@ cache: Dict = {
     "reuters": {"items": [], "last_updated": None, "error": None},
     "toi_liveblog": {"items": [], "last_updated": None, "error": None},
     "think_tanks": {"items": [], "last_updated": None, "error": None},
+    "situation_board": {"items": [], "last_updated": None, "error": None},  # AI region cards
     "prediction_markets": {"items": [], "last_updated": None, "error": None},
     "ai_summary": {
         "items": [],
@@ -1850,7 +1852,7 @@ def _build_feed_digest() -> str:
     ]
 
     for feed_name, feed_data in cache.items():
-        if feed_name in ("ai_summary", "prediction_markets"):
+        if feed_name in ("ai_summary", "prediction_markets", "situation_board"):
             continue
         items = feed_data.get("items", [])
         if not items:
@@ -2161,6 +2163,74 @@ def fetch_ai_summary(force: bool = False) -> None:
         _generate_regular_summary(api_key)
     else:
         logger.debug(f"AI summary: hour {current_hour} not on schedule, skipping")
+        return
+    _generate_situation_board(api_key)
+
+
+# ============ SITUATION BOARD ============
+
+_BOARD_TRENDS = {"escalating", "stable", "de-escalating"}
+
+
+def _parse_board(text: str) -> List[Dict]:
+    """Parse the model's JSON card array; return [] if it's malformed."""
+    match = re.search(r"\[.*\]", text, re.DOTALL)  # tolerate stray prose/fences
+    if not match:
+        return []
+    try:
+        raw = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return []
+    cards = []
+    for c in raw if isinstance(raw, list) else []:
+        if not isinstance(c, dict) or not c.get("region") or not c.get("summary"):
+            continue
+        trend = str(c.get("trend", "stable")).lower()
+        cards.append({
+            "region": str(c["region"])[:40],
+            "trend": trend if trend in _BOARD_TRENDS else "stable",
+            "headline": str(c.get("headline", ""))[:140],
+            "summary": str(c["summary"])[:400],
+            "last_event": str(c.get("last_event", ""))[:160],
+            "last_event_time": str(c.get("last_event_time", ""))[:20],
+        })
+    return cards
+
+
+def _generate_situation_board(api_key: str) -> None:
+    """Regenerate the per-region status cards (Haiku, JSON output).
+
+    On any failure the previous board stays up — a slightly old board beats
+    an empty column, and the header badge shows its age.
+    """
+    feed_digest = _build_feed_digest()
+    if not feed_digest:
+        return
+    oil = _build_oil_context()
+    if oil:
+        feed_digest += "\n" + oil
+    previous = cache["situation_board"]["items"]
+    if previous:
+        feed_digest += "\n\n--- PREVIOUS BOARD ---\n" + "\n".join(
+            f"{c['region']}: {c['trend']} — {c['headline']}" for c in previous)
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        message = client.messages.create(
+            model=AI_SUMMARY_REGULAR_MODEL,
+            max_tokens=AI_SUMMARY_MAX_TOKENS,
+            system=SITUATION_BOARD_PROMPT.format(regions=", ".join(SITUATION_BOARD_REGIONS)),
+            messages=[{"role": "user", "content": feed_digest}],
+        )
+        cards = _parse_board(_message_text(message))
+        if not cards:
+            raise ValueError("model returned no parseable cards")
+        cache["situation_board"] = {"items": cards, "last_updated": datetime.now(), "error": None}
+        logger.info(f"Situation board: {len(cards)} cards "
+                    f"({', '.join(c['region'] + '=' + c['trend'] for c in cards)})")
+    except Exception as e:
+        logger.warning(f"Situation board generation failed: {e}")
+        cache["situation_board"]["error"] = f"Board update failed: {str(e)[:80]}"
 
 
 # ============ CANDLE LIGHTING SUMMARY ============
@@ -2499,7 +2569,7 @@ def _watchdog_loop():
     a schedule, not every interval.
     """
     stale_threshold = REFRESH_INTERVAL * 3  # seconds
-    WATCHDOG_EXCLUDED = {"ai_summary"}  # Schedule-based, not interval-based
+    WATCHDOG_EXCLUDED = {"ai_summary", "situation_board"}  # Schedule-based, not interval-based
     while True:
         time.sleep(REFRESH_INTERVAL * 2)
         try:
@@ -2603,6 +2673,12 @@ if __name__ == "__main__":
     # Initial fetch on startup
     logger.info("Performing initial feed fetch...")
     update_all_feeds()
+
+    # Situation board: build once at startup if AI is on (one cheap Haiku call),
+    # so the column isn't empty for up to 2 hours after a restart
+    if ai_summary_enabled and HAS_ANTHROPIC and os.environ.get("ANTHROPIC_API_KEY") \
+            and not cache["situation_board"]["items"]:
+        _generate_situation_board(os.environ["ANTHROPIC_API_KEY"])
 
     # AI summary starts OFF — no initial API call. User toggles on via dashboard.
     # (Previous behavior: auto-called on startup, wasting credits if nobody was watching)

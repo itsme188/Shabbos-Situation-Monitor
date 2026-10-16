@@ -246,3 +246,26 @@ Rules:
 - If oil market context is provided, use it to calibrate how significant events are (large price moves = markets reacting), but NEVER mention oil prices, market data, or financial implications in your output
 - Keep it concise — this is a quick status check before Shabbos begins
 """
+
+# Situation Board — per-region status cards (replaces the Strategic Analysis column).
+# Regenerated alongside every scheduled AI summary (and on manual refresh / startup).
+SITUATION_BOARD_REGIONS = ["Israel", "Iran", "Yemen / Gulf", "Russia–Ukraine", "US Response"]
+
+SITUATION_BOARD_PROMPT = """You maintain a situation board for someone glancing at a screen during Shabbos.
+From the feed data, write one status card per region, in this order: {regions}.
+Return ONLY a JSON array, no prose, no code fences. Each element:
+{{
+  "region": "<region name exactly as given>",
+  "trend": "escalating" | "stable" | "de-escalating",
+  "headline": "<the single most important current fact, max 12 words>",
+  "summary": "<current state of play in 2 short sentences, max 45 words>",
+  "last_event": "<most significant recent event, max 15 words>",
+  "last_event_time": "<when it happened, ET, format Day H:MM AM/PM, e.g. Fri 3:27 PM; empty string if unknown>"
+}}
+Rules:
+- Use only the feed data; never invent events. If a region has nothing new, say so plainly and mark it "stable".
+- Prefer the newest information; the current time is at the top of the feed data.
+- The STRATEGIC ANALYSIS section is background: use it to judge trajectory, don't cite it as news.
+- If oil market context is provided, use it only to calibrate significance; never mention markets or prices.
+- If a PREVIOUS BOARD is provided, judge "trend" relative to it.
+"""

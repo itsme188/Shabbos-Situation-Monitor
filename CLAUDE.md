@@ -27,7 +27,8 @@
 ## Feed Architecture
 - Each feed has: fetcher function, cache entry, error state, last_updated timestamp
 - `update_all_feeds()` runs all fetchers concurrently via ThreadPoolExecutor
-- **Dashboard layout**: Strategic Analysis | Middle East | TOI | Live Wire (Telegram+RSS+Trump) | AI Summary
+- **Dashboard layout**: Situation Board | Middle East | TOI | Live Wire (Telegram+RSS+Trump) | AI Summary
+- **Situation Board** (`situation_board` cache key, 1st column, replaced the Strategic Analysis display Oct 2026): Haiku returns a JSON array of per-region cards (`SITUATION_BOARD_REGIONS`, `SITUATION_BOARD_PROMPT`) — region, trend, headline, summary, last major event + time. Regenerated after every scheduled/forced AI summary and once at startup if AI is on. `_parse_board()` validates; on failure the previous board stays up. Excluded from the watchdog and from the feed digest. Think tanks are still fetched and fed to the LLM as background.
 - **Think tank feed** (`think_tanks` cache key): FDD (direct RSS), CSIS (scrape `csis.org/analysis`), ISW (scrape `understandingwar.org/publications`). Google News RSS article URLs don't work (JS-only redirect). Each article is AI-summarized via Haiku (cached by URL, max 5 new/cycle). Recency filter: `THINK_TANK_MAX_AGE_HOURS = 36`.
 - **Live Wire column** (was "Raw Feeds"/OSINT): Telegram channels (`t.me/s/<channel>` public HTML) + outlet RSS, merged with Trump posts in `dashboard()`. Config: `LIVE_WIRE_TELEGRAM`, `LIVE_WIRE_RSS`, `LIVE_WIRE_REGION_KEYWORDS`. Each item gets a region tag (keyword match, else source default). `_balance_wire()` sorts, dedupes, caps per region (`LIVE_WIRE_PER_REGION`) so one busy front can't crowd out others.
 - Live Wire still uses the `twitter_list` cache key and `fetch_twitter_accounts()` name for cache compatibility
